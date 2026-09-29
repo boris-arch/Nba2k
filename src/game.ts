@@ -1,773 +1,875 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- * NBA 2K-style Basketball Game - Complete Implementation
- */
-
 import * as THREE from 'three';
-import * as CANNON from 'cannon-es';
 
-// ============================================================================
-// TYPE DEFINITIONS
-// ============================================================================
-
-interface Player {
+export interface PlayerData {
   id: string;
   name: string;
-  number: number;
-  team: 'warriors' | 'rockets';
-  position: THREE.Vector3;
-  mesh: THREE.Group;
-  body: CANNON.Body;
-  stamina: number;
-  maxStamina: number;
-  isControlled: boolean;
-  nameplate: HTMLElement | null; // FIX #2: Single nameplate per player
-  isRunning: boolean;
-  legRotation: number; // For running animation - FIX #4
+  number: string;
+  team: 'GSW' | 'HOU';
+  position: 'PG' | 'SG' | 'SF' | 'PF' | 'C';
+  threePointRating: number;
+  midRangeRating: number;
+  speed: number;
 }
 
-interface GameState {
-  score: { warriors: number; rockets: number };
-  quarter: number;
-  gameTime: number;
-  shotClock: number;
-  possession: 'warriors' | 'rockets';
-  gameActive: boolean;
-  lastMakeWasGreen: boolean;
+export interface ShotResult {
+  isGreen: boolean;
+  points: number;
+  quality: string;
+  team: 'GSW' | 'HOU';
 }
 
-// ============================================================================
-// GAME SCENE & PHYSICS SETUP
-// ============================================================================
-
-export class NBAGame {
+export class BasketballGame {
+  private container: HTMLElement;
   private scene: THREE.Scene;
-  private camera: THREE.Camera;
+  private camera: THREE.PerspectiveCamera;
   private renderer: THREE.WebGLRenderer;
-  private world: CANNON.World;
-  private gameState: GameState;
-  private players: Map<string, Player>;
-  private controlledPlayerId: string | null = null;
-  private ball: { mesh: THREE.Mesh; body: CANNON.Body } | null = null;
-  private confettiParticles: THREE.Points[] = [];
-  private floatingTexts: { mesh: THREE.Mesh; startTime: number }[] = [];
 
-  constructor(canvasContainer: HTMLElement) {
-    // THREE.js setup
+  // Game state
+  private homeScore = 10;
+  private awayScore = 8;
+  private shotClock = 24.0;
+  private gameClock = 720.0;
+  private isGameOver = false;
+
+  // Ball & Shooting
+  private ball!: THREE.Mesh;
+  private ballVelocity = new THREE.Vector3();
+  private ballHolder: PlayerMesh | null = null;
+  private isBallInFlight = false;
+  private activeShot: {
+    startPos: THREE.Vector3;
+    targetHoop: THREE.Vector3;
+    progress: number;
+    duration: number;
+    peakHeight: number;
+    isGreen: boolean;
+    points: number;
+    shooterTeam: 'GSW' | 'HOU';
+    willMake: boolean;
+  } | null = null;
+
+  // Teams & Players
+  private players: PlayerMesh[] = [];
+  private controlledPlayer!: PlayerMesh;
+
+  // Single Nameplate instance (Fix for duplicate labels)
+  private nameplateSprite!: THREE.Sprite;
+  private nameplateCanvas!: HTMLCanvasElement;
+  private nameplateContext!: CanvasRenderingContext2D;
+
+  // Hoops
+  private gswHoopPos = new THREE.Vector3(0, 3.05, -13.0); // Houston defends this
+  private houHoopPos = new THREE.Vector3(0, 3.05, 13.0);  // GSW defends this
+
+  // Visual FX
+  private floatingTexts: { sprite: THREE.Sprite; lifetime: number; maxLife: number }[] = [];
+  private confettiParticles: { mesh: THREE.Mesh; vel: THREE.Vector3; life: number }[] = [];
+
+  // AI timers
+  private aiDecisionTimer = 0;
+  private aiPassTimer = 0;
+
+  // Callbacks to UI
+  public onScoreUpdate?: (home: number, away: number, points: number, team: string) => void;
+  public onShotMeterUpdate?: (value: number, isOpen: boolean) => void;
+  public onShotReleased?: (quality: string, isGreen: boolean) => void;
+  public onShotClockUpdate?: (seconds: number) => void;
+
+  // Keys
+  private keys: { [key: string]: boolean } = {};
+  private shotHoldTime = 0;
+  private isChargingShot = false;
+
+  constructor(container: HTMLElement) {
+    this.container = container;
+
+    // Scene & Camera
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x070a12);
-    
+    this.scene.background = new THREE.Color(0x111622);
+
     this.camera = new THREE.PerspectiveCamera(
-      75,
-      window.innerWidth / window.innerHeight,
+      50,
+      container.clientWidth / container.clientHeight,
       0.1,
       1000
     );
-    this.camera.position.set(0, 10, 20);
-    this.camera.lookAt(0, 3, 0);
+    this.camera.position.set(0, 16, 22);
+    this.camera.lookAt(0, 0, 0);
 
-    this.renderer = new THREE.WebGLRenderer({
-      antialias: true,
-      alpha: false,
-      powerPreference: 'high-performance'
-    });
-    this.renderer.setSize(window.innerWidth, window.innerHeight);
+    // Renderer
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    this.renderer.setSize(container.clientWidth, container.clientHeight);
     this.renderer.shadowMap.enabled = true;
-    canvasContainer.appendChild(this.renderer.domElement);
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    container.appendChild(this.renderer.domElement);
 
-    // Physics setup
-    this.world = new CANNON.World();
-    this.world.gravity.set(0, -9.82, 0);
-    this.world.defaultContactMaterial.friction = 0.4;
+    // Init components
+    this.setupLighting();
+    this.createCourt();
+    this.createHoops();
+    this.createBall();
+    this.createSingleNameplate();
+    this.spawnTeams();
 
-    // Initialize game state
-    this.gameState = {
-      score: { warriors: 0, rockets: 0 },
-      quarter: 1,
-      gameTime: 720, // 12 minutes in seconds
-      shotClock: 24,
-      possession: 'warriors',
-      gameActive: false,
-      lastMakeWasGreen: false
-    };
+    // Default possession: Curry has the ball
+    this.ballHolder = this.controlledPlayer;
 
-    this.players = new Map();
+    // Listeners
+    window.addEventListener('resize', this.onResize);
+    window.addEventListener('keydown', this.onKeyDown);
+    window.addEventListener('keyup', this.onKeyUp);
 
-    // Setup court, teams, ball
-    this.setupCourt();
-    this.setupTeams();
-    this.setupBall();
-    this.setupLights();
-    this.attachEventListeners();
-
-    // Animation loop
-    this.animate();
+    // Start loop
+    this.animate(0);
   }
 
-  // ========================================================================
-  // COURT & ARENA SETUP
-  // ========================================================================
+  // ----------------------------------------------------
+  // COURT & ENVIRONMENT
+  // ----------------------------------------------------
+  private setupLighting() {
+    const ambient = new THREE.AmbientLight(0xffffff, 0.7);
+    this.scene.add(ambient);
 
-  private setupCourt(): void {
-    // Court floor
-    const courtGeom = new THREE.PlaneGeometry(94, 50);
-    const courtMat = new THREE.MeshLambertMaterial({ color: 0xd2691e });
-    const courtMesh = new THREE.Mesh(courtGeom, courtMat);
-    courtMesh.receiveShadow = true;
-    this.scene.add(courtMesh);
+    const dirLight = new THREE.DirectionalLight(0xfff5e6, 1.2);
+    dirLight.position.set(15, 30, 15);
+    dirLight.castShadow = true;
+    dirLight.shadow.mapSize.width = 2048;
+    dirLight.shadow.mapSize.height = 2048;
+    this.scene.add(dirLight);
 
-    // Physics floor
-    const floorShape = new CANNON.Plane();
-    const floorBody = new CANNON.Body({ mass: 0, shape: floorShape });
-    floorBody.quaternion.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), -Math.PI / 2);
-    this.world.addBody(floorBody);
-
-    // Court lines (simplified)
-    this.drawCourtLines();
-
-    // Hoop assembly (simplified)
-    this.setupHoop();
+    const rimLight = new THREE.DirectionalLight(0x88bbff, 0.4);
+    rimLight.position.set(-15, 20, -15);
+    this.scene.add(rimLight);
   }
 
-  private drawCourtLines(): void {
-    const lines: { start: THREE.Vector3; end: THREE.Vector3 }[] = [
-      // Baseline
-      { start: new THREE.Vector3(-47, 0.01, -25), end: new THREE.Vector3(-47, 0.01, 25) },
-      // Half court
-      { start: new THREE.Vector3(0, 0.01, -25), end: new THREE.Vector3(0, 0.01, 25) },
-      // Free throw line
-      { start: new THREE.Vector3(-40, 0.01, -16), end: new THREE.Vector3(-40, 0.01, 16) }
-    ];
-
-    lines.forEach(line => {
-      const geom = new THREE.BufferGeometry().setFromPoints([line.start, line.end]);
-      const mat = new THREE.LineBasicMaterial({ color: 0xffffff });
-      const lineObj = new THREE.Line(geom, mat);
-      this.scene.add(lineObj);
+  private createCourt() {
+    // Floor
+    const courtGeo = new THREE.PlaneGeometry(15.24, 28.65);
+    const courtMat = new THREE.MeshStandardMaterial({
+      color: 0xcca066,
+      roughness: 0.35,
+      metalness: 0.1,
     });
-  }
+    const court = new THREE.Mesh(courtGeo, courtMat);
+    court.rotation.x = -Math.PI / 2;
+    court.receiveShadow = true;
+    this.scene.add(court);
 
-  private setupHoop(): void {
-    const rimRadius = 0.23;
-    const rimHeight = 3.05;
-
-    // Backboard
-    const backboardGeom = new THREE.BoxGeometry(1.05, 1.05, 0.1);
-    const backboardMat = new THREE.MeshStandardMaterial({
-      color: 0xffffff,
-      metalness: 0.8,
-      roughness: 0.2
-    });
-    const backboard = new THREE.Mesh(backboardGeom, backboardMat);
-    backboard.position.set(-41, rimHeight, 0);
-    backboard.castShadow = true;
-    this.scene.add(backboard);
-
-    // Rim (collision detected here for scoring)
-    const rimGeom = new THREE.TorusGeometry(rimRadius, 0.025, 8, 32);
-    const rimMat = new THREE.MeshStandardMaterial({ color: 0xff0000 });
-    const rim = new THREE.Mesh(rimGeom, rimMat);
-    rim.position.set(-41, rimHeight, 0);
-    rim.rotation.x = Math.PI / 2;
-    rim.castShadow = true;
-    rim.name = 'hoop-rim';
-    this.scene.add(rim);
-
-    // Rim physics (for ball collision)
-    const rimBody = new CANNON.Body({
-      mass: 0,
-      shape: new CANNON.Sphere(rimRadius)
-    });
-    rimBody.position.set(-41, rimHeight, 0);
-    this.world.addBody(rimBody);
-  }
-
-  // ========================================================================
-  // TEAM & PLAYER SETUP
-  // ========================================================================
-
-  private setupTeams(): void {
-    const warriorPositions = [
-      { pos: new THREE.Vector3(0, 0, 0), name: 'S. CURRY', num: 30 },
-      { pos: new THREE.Vector3(5, 0, 5), name: 'D. GREEN', num: 23 },
-      { pos: new THREE.Vector3(-5, 0, 8), name: 'K. THOMPSON', num: 11 },
-      { pos: new THREE.Vector3(8, 0, -3), name: 'A. WIGGINS', num: 22 },
-      { pos: new THREE.Vector3(-8, 0, -5), name: 'T. LOONEY', num: 5 }
-    ];
-
-    const rocketPositions = [
-      { pos: new THREE.Vector3(-10, 0, 0), name: 'J. HARDEN', num: 13 },
-      { pos: new THREE.Vector3(-15, 0, 6), name: 'E. GORDON', num: 10 },
-      { pos: new THREE.Vector3(-8, 0, -8), name: 'A. MARTIN', num: 12 },
-      { pos: new THREE.Vector3(-12, 0, 8), name: 'S. ALRIDGE', num: 14 },
-      { pos: new THREE.Vector3(-20, 0, 0), name: 'S. ADAMS', num: 25 }
-    ];
-
-    warriorPositions.forEach((p, idx) => {
-      const player = this.createPlayer(p.pos, 'warriors', p.name, p.num, idx === 0);
-      this.players.set(player.id, player);
-    });
-
-    rocketPositions.forEach((p, idx) => {
-      const player = this.createPlayer(p.pos, 'rockets', p.name, p.num, false);
-      this.players.set(player.id, player);
-    });
-  }
-
-  private createPlayer(
-    startPos: THREE.Vector3,
-    team: 'warriors' | 'rockets',
-    name: string,
-    number: number,
-    isControlled: boolean
-  ): Player {
-    const playerId = `${team}-${number}`;
-
-    // Visual: simplified player capsule
-    const playerGroup = new THREE.Group();
-    const torsoGeom = new THREE.CapsuleGeometry(0.25, 0.8, 4, 8);
-    const teamColor = team === 'warriors' ? 0x1d428a : 0xce1141;
-    const torsoMat = new THREE.MeshStandardMaterial({ color: teamColor });
-    const torso = new THREE.Mesh(torsoGeom, torsoMat);
-    torso.castShadow = true;
-    torso.position.y = 0.4;
-    playerGroup.add(torso);
-
-    // Legs (for running animation - FIX #4)
-    const leftLegGeom = new THREE.BoxGeometry(0.12, 0.6, 0.12);
-    const legMat = new THREE.MeshStandardMaterial({ color: 0x2a2a2a });
-    const leftLeg = new THREE.Mesh(leftLegGeom, legMat);
-    leftLeg.position.set(-0.15, -0.1, 0);
-    leftLeg.castShadow = true;
-    leftLeg.name = 'left-leg';
-    playerGroup.add(leftLeg);
-
-    const rightLeg = new THREE.Mesh(leftLegGeom, legMat);
-    rightLeg.position.set(0.15, -0.1, 0);
-    rightLeg.castShadow = true;
-    rightLeg.name = 'right-leg';
-    playerGroup.add(rightLeg);
-
-    playerGroup.position.copy(startPos);
-    this.scene.add(playerGroup);
-
-    // Physics body (capsule approximated as cylinder)
-    const playerShape = new CANNON.Sphere(0.35);
-    const playerBody = new CANNON.Body({
-      mass: 1,
-      shape: playerShape,
-      linearDamping: 0.9,
-      angularDamping: 0.9
-    });
-    playerBody.position.copy(startPos);
-    this.world.addBody(playerBody);
-
-    const player: Player = {
-      id: playerId,
-      name,
-      number,
-      team,
-      position: startPos.clone(),
-      mesh: playerGroup,
-      body: playerBody,
-      stamina: 100,
-      maxStamina: 100,
-      isControlled,
-      nameplate: null,
-      isRunning: false,
-      legRotation: 0
-    };
-
-    // FIX #2: Create exactly ONE nameplate per player
-    this.createPlayerNameplate(player);
-
-    if (isControlled) {
-      this.controlledPlayerId = playerId;
-    }
-
-    return player;
-  }
-
-  // FIX #2: Single nameplate management
-  private createPlayerNameplate(player: Player): void {
-    if (player.nameplate) {
-      player.nameplate.remove();
-    }
-
-    const nameplate = document.createElement('div');
-    nameplate.className = 'player-ring-tag';
-    nameplate.style.position = 'absolute';
-    nameplate.style.display = 'none'; // Hidden until positioned
-    nameplate.innerHTML = `
-      <div class="player-tag-row">
-        <span>${player.name}</span>
-        <span>#${player.number}</span>
-      </div>
-      <div class="stamina-track">
-        <div class="stamina-fill" style="width: 100%"></div>
-      </div>
-    `;
-    document.getElementById('hud-layer')?.appendChild(nameplate);
-    player.nameplate = nameplate;
-  }
-
-  // ========================================================================
-  // BALL SETUP
-  // ========================================================================
-
-  private setupBall(): void {
-    const ballRadius = 0.12;
-    const ballGeom = new THREE.SphereGeometry(ballRadius, 32, 32);
-    const ballMat = new THREE.MeshStandardMaterial({
-      color: 0xff6600,
-      roughness: 0.6
-    });
-    const ballMesh = new THREE.Mesh(ballGeom, ballMat);
-    ballMesh.castShadow = true;
-    ballMesh.position.set(5, 2, 0);
-    this.scene.add(ballMesh);
-
-    const ballBody = new CANNON.Body({
-      mass: 0.6,
-      shape: new CANNON.Sphere(ballRadius),
-      linearDamping: 0.3,
-      angularDamping: 0.3,
-      restitution: 0.8
-    });
-    ballBody.position.copy(ballMesh.position);
-    this.world.addBody(ballBody);
-
-    this.ball = { mesh: ballMesh, body: ballBody };
-  }
-
-  // ========================================================================
-  // LIGHTING
-  // ========================================================================
-
-  private setupLights(): void {
-    // Ambient light
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
-    this.scene.add(ambientLight);
-
-    // Arena spotlights
-    const spotlights = [
-      { pos: [30, 25, 30], target: [0, 0, 0] },
-      { pos: [-30, 25, 30], target: [0, 0, 0] },
-      { pos: [30, 25, -30], target: [0, 0, 0] },
-      { pos: [-30, 25, -30], target: [0, 0, 0] }
-    ];
-
-    spotlights.forEach(sl => {
-      const light = new THREE.SpotLight(0xffffff, 0.8);
-      light.position.set(...(sl.pos as [number, number, number]));
-      light.target.position.set(...(sl.target as [number, number, number]));
-      light.castShadow = true;
-      light.shadow.mapSize.width = 2048;
-      light.shadow.mapSize.height = 2048;
-      this.scene.add(light);
-      this.scene.add(light.target);
-    });
-  }
-
-  // ========================================================================
-  // GAME LOGIC: SHOOTING, SCORING, AI
-  // ========================================================================
-
-  // FIX #1: Perfect green release = 100% make
-  public attemptShot(timing: number): void {
-    if (!this.ball || !this.controlledPlayerId) return;
-
-    const player = this.players.get(this.controlledPlayerId);
-    if (!player) return;
-
-    const isPerfectTiming = Math.abs(timing) < 0.05; // Very tight window
-    const makePercentage = isPerfectTiming ? 1.0 : Math.random() > 0.5 ? 1.0 : 0.0;
-
-    // Apply shot trajectory
-    const shooterPos = player.position;
-    const hoopPos = new THREE.Vector3(-41, 3.05, 0);
-    const direction = hoopPos.clone().sub(shooterPos).normalize();
-
-    this.ball.body.velocity.set(
-      direction.x * 20,
-      direction.y * 15,
-      direction.z * 20
-    );
-
-    // FIX #1: Check if ball goes in (simplified hit detection)
-    setTimeout(() => {
-      const ballPos = this.ball!.mesh.position;
-      const distToHoop = ballPos.distanceTo(new THREE.Vector3(-41, 3.05, 0));
-
-      if (distToHoop < 0.5 && Math.random() < makePercentage) {
-        this.onBasketMade(3, isPerfectTiming); // Assume 3PT
-      }
-    }, 1500);
-  }
-
-  // FIX #1: When basket is made, update scoreboard and show popup
-  private onBasketMade(points: number, wasPerfectTiming: boolean): void {
-    if (this.gameState.possession === 'warriors') {
-      this.gameState.score.warriors += points;
-    } else {
-      this.gameState.score.rockets += points;
-    }
-
-    this.gameState.lastMakeWasGreen = wasPerfectTiming;
-
-    // Update scoreboard
-    this.updateScoreboard();
-
-    // FIX #1: Show floating "+2" or "+3" popup
-    this.showFloatingPoints(points);
-
-    // FIX #1: Confetti only for perfect releases
-    if (wasPerfectTiming) {
-      this.triggerConfetti();
-    }
-
-    // Reset possession
-    this.gameState.shotClock = 24;
-    this.gameState.possession = this.gameState.possession === 'warriors' ? 'rockets' : 'warriors';
-  }
-
-  // FIX #1: Floating score popup near hoop
-  private showFloatingPoints(points: number): void {
-    const popupEl = document.getElementById('floating-score-popup');
-    if (!popupEl) return;
-
-    popupEl.textContent = `+${points}`;
-    popupEl.style.color = '#fbbf24';
-    popupEl.classList.remove('show-points');
-
-    // Trigger reflow to restart animation
-    void popupEl.offsetWidth;
-    popupEl.classList.add('show-points');
-
-    // Position at hoop
-    const hoopScreenPos = this.worldToScreen(new THREE.Vector3(-41, 3.05, 0));
-    popupEl.style.left = hoopScreenPos.x + 'px';
-    popupEl.style.top = hoopScreenPos.y + 'px';
-  }
-
-  // FIX #1: Confetti only for perfect releases (not normal baskets)
-  private triggerConfetti(): void {
-    const confettiCanvas = document.getElementById('confetti-canvas') as HTMLCanvasElement;
-    if (!confettiCanvas) return;
-
-    const ctx = confettiCanvas.getContext('2d');
-    if (!ctx) return;
-
-    // Small burst of confetti for green releases
-    for (let i = 0; i < 20; i++) {
-      const angle = (Math.PI * 2 * i) / 20;
-      const velocity = {
-        x: Math.cos(angle) * 8,
-        y: Math.sin(angle) * 8 - 2
-      };
-      this.createConfettiParticle(ctx, confettiCanvas, velocity);
-    }
-  }
-
-  private createConfettiParticle(
-    ctx: CanvasRenderingContext2D,
-    canvas: HTMLCanvasElement,
-    velocity: { x: number; y: number }
-  ): void {
-    const x = canvas.width / 2;
-    const y = canvas.height / 2;
-    const color = ['#fbbf24', '#22c55e', '#ef4444'][Math.floor(Math.random() * 3)];
-    const lifetime = 2000; // 2 seconds
-    const startTime = Date.now();
-
-    const particle = {
-      x,
-      y,
-      vx: velocity.x,
-      vy: velocity.y,
-      color,
-      startTime,
-      draw: () => {
-        const elapsed = Date.now() - startTime;
-        if (elapsed > lifetime) return false;
-
-        const alpha = 1 - elapsed / lifetime;
-        ctx.save();
-        ctx.globalAlpha = alpha;
-        ctx.fillStyle = color;
-        ctx.beginPath();
-        ctx.arc(particle.x, particle.y, 3, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
-
-        particle.x += particle.vx;
-        particle.y += particle.vy;
-        particle.vy += 0.1; // gravity
-
-        return true;
-      }
-    };
-
-    this.confettiParticles.push(particle as any);
-  }
-
-  // FIX #5: AI offense - Houston dribbles, passes, attempts shots
-  private updateAIOffense(): void {
-    if (this.gameState.possession !== 'rockets') return;
-
-    const rocketPlayers = Array.from(this.players.values()).filter(p => p.team === 'rockets');
-    if (rocketPlayers.length === 0) return;
-
-    // Simple AI: ball handler dribbles toward basket
-    const ballHandler = rocketPlayers[0];
-    const hoopPos = new THREE.Vector3(-41, 0, 0);
-    const dirToHoop = hoopPos.clone().sub(ballHandler.position).normalize();
-
-    // FIX #5: Move toward basket
-    ballHandler.body.velocity.set(dirToHoop.x * 6, 0, dirToHoop.z * 6);
-
-    // FIX #5: Attempt shot when close enough
-    if (ballHandler.position.distanceTo(hoopPos) < 15) {
-      if (Math.random() < 0.1) {
-        this.attemptShot(Math.random() * 0.1 - 0.05); // Slight variance
-      }
-    }
-
-    // FIX #5: Pass to open teammate occasionally
-    const openTeammate = this.findOpenTeammate(ballHandler, rocketPlayers);
-    if (openTeammate && Math.random() < 0.05) {
-      this.executePass(ballHandler, openTeammate);
-    }
-  }
-
-  private findOpenTeammate(handler: Player, teammates: Player[]): Player | null {
-    const warriors = Array.from(this.players.values()).filter(p => p.team === 'warriors');
+    // Lines & Keys
+    const lineMat = new THREE.LineBasicMaterial({ color: 0xffffff, linewidth: 2 });
     
-    for (const teammate of teammates) {
-      if (teammate.id === handler.id) continue;
+    // Half court line
+    const halfLineGeo = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(-7.62, 0.01, 0),
+      new THREE.Vector3(7.62, 0.01, 0)
+    ]);
+    this.scene.add(new THREE.Line(halfLineGeo, lineMat));
 
-      let isOpen = true;
-      for (const defender of warriors) {
-        if (defender.position.distanceTo(teammate.position) < 3) {
-          isOpen = false;
-          break;
+    // Center circle
+    const circleGeo = new THREE.BufferGeometry().setFromPoints(
+      new THREE.Path().absarc(0, 0, 1.8, 0, Math.PI * 2, true).getPoints(32).map(p => new THREE.Vector3(p.x, 0.01, p.y))
+    );
+    this.scene.add(new THREE.Line(circleGeo, lineMat));
+  }
+
+  private createHoops() {
+    const createHoop = (zPos: number, isAway: boolean) => {
+      const hoopGroup = new THREE.Group();
+      hoopGroup.position.set(0, 0, zPos);
+      if (isAway) hoopGroup.rotation.y = Math.PI;
+
+      // Pole
+      const poleGeo = new THREE.CylinderGeometry(0.1, 0.1, 3.8);
+      const poleMat = new THREE.MeshStandardMaterial({ color: 0x222222 });
+      const pole = new THREE.Mesh(poleGeo, poleMat);
+      pole.position.set(0, 1.9, 1.2);
+      hoopGroup.add(pole);
+
+      // Backboard
+      const bbGeo = new THREE.BoxGeometry(1.8, 1.05, 0.05);
+      const bbMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.2 });
+      const bb = new THREE.Mesh(bbGeo, bbMat);
+      bb.position.set(0, 3.3, 0.4);
+      hoopGroup.add(bb);
+
+      // Rim
+      const rimGeo = new THREE.TorusGeometry(0.3, 0.02, 8, 24);
+      const rimMat = new THREE.MeshStandardMaterial({ color: 0xe65100, roughness: 0.3 });
+      const rim = new THREE.Mesh(rimGeo, rimMat);
+      rim.rotation.x = Math.PI / 2;
+      rim.position.set(0, 3.05, 0.05);
+      hoopGroup.add(rim);
+
+      this.scene.add(hoopGroup);
+    };
+
+    createHoop(-13.0, false); // GSW attacks this rim
+    createHoop(13.0, true);   // HOU attacks this rim
+  }
+
+  private createBall() {
+    const ballGeo = new THREE.SphereGeometry(0.24, 24, 24);
+    const ballMat = new THREE.MeshStandardMaterial({
+      color: 0xdf5b12,
+      roughness: 0.5,
+    });
+    this.ball = new THREE.Mesh(ballGeo, ballMat);
+    this.ball.castShadow = true;
+    this.ball.position.set(0, 1.2, 0);
+    this.scene.add(this.ball);
+  }
+
+  // ----------------------------------------------------
+  // (2) SINGLE NAMEPLATE (NO DUPLICATES)
+  // ----------------------------------------------------
+  private createSingleNameplate() {
+    this.nameplateCanvas = document.createElement('canvas');
+    this.nameplateCanvas.width = 256;
+    this.nameplateCanvas.height = 64;
+    this.nameplateContext = this.nameplateCanvas.getContext('2d')!;
+
+    const texture = new THREE.CanvasTexture(this.nameplateCanvas);
+    const spriteMat = new THREE.SpriteMaterial({
+      map: texture,
+      transparent: true,
+      depthTest: false,
+    });
+
+    this.nameplateSprite = new THREE.Sprite(spriteMat);
+    this.nameplateSprite.scale.set(2.2, 0.55, 1);
+    this.nameplateSprite.renderOrder = 999;
+    this.scene.add(this.nameplateSprite);
+  }
+
+  private updateControlledNameplate(player: PlayerMesh) {
+    const ctx = this.nameplateContext;
+    ctx.clearRect(0, 0, 256, 64);
+
+    // Background pill
+    ctx.fillStyle = player.data.team === 'GSW' ? 'rgba(0, 83, 188, 0.85)' : 'rgba(206, 17, 65, 0.85)';
+    ctx.beginPath();
+    ctx.roundRect(10, 8, 236, 48, 12);
+    ctx.fill();
+
+    // Border
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = player.data.team === 'GSW' ? '#fdb927' : '#ffffff';
+    ctx.stroke();
+
+    // Text
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 22px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`${player.data.name} #${player.data.number}`, 128, 32);
+
+    (this.nameplateSprite.material as THREE.SpriteMaterial).map!.needsUpdate = true;
+    this.nameplateSprite.visible = true;
+  }
+
+  // ----------------------------------------------------
+  // PLAYER GENERATION (WITH SWINGING LEGS & ARMS)
+  // ----------------------------------------------------
+  private createPlayerMesh(data: PlayerData): PlayerMesh {
+    const group = new THREE.Group() as unknown as PlayerMesh;
+    group.data = data;
+    group.runCycle = Math.random() * Math.PI;
+
+    const jerseyColor = data.team === 'GSW' ? 0x0053bc : 0xce1141;
+    const skinColor = 0xc68642;
+
+    // Torso / Jersey
+    const torsoGeo = new THREE.BoxGeometry(0.65, 0.85, 0.35);
+    const torsoMat = new THREE.MeshStandardMaterial({ color: jerseyColor });
+    const torso = new THREE.Mesh(torsoGeo, torsoMat);
+    torso.position.y = 1.35;
+    torso.castShadow = true;
+    group.add(torso);
+
+    // Head
+    const headGeo = new THREE.SphereGeometry(0.2, 16, 16);
+    const headMat = new THREE.MeshStandardMaterial({ color: skinColor });
+    const head = new THREE.Mesh(headGeo, headMat);
+    head.position.y = 2.0;
+    head.castShadow = true;
+    group.add(head);
+
+    // Legs with Hip Pivots for Running Animation
+    const legGeo = new THREE.CylinderGeometry(0.1, 0.09, 0.85, 12);
+    const legMat = new THREE.MeshStandardMaterial({ color: 0x222222 });
+
+    const leftLegPivot = new THREE.Group();
+    leftLegPivot.position.set(-0.2, 0.9, 0);
+    const leftLeg = new THREE.Mesh(legGeo, legMat);
+    leftLeg.position.y = -0.42;
+    leftLeg.castShadow = true;
+    leftLegPivot.add(leftLeg);
+    group.add(leftLegPivot);
+
+    const rightLegPivot = new THREE.Group();
+    rightLegPivot.position.set(0.2, 0.9, 0);
+    const rightLeg = new THREE.Mesh(legGeo, legMat);
+    rightLeg.position.y = -0.42;
+    rightLeg.castShadow = true;
+    rightLegPivot.add(rightLeg);
+    group.add(rightLegPivot);
+
+    // Arms
+    const armGeo = new THREE.CylinderGeometry(0.08, 0.07, 0.7, 12);
+    const armMat = new THREE.MeshStandardMaterial({ color: skinColor });
+
+    const leftArmPivot = new THREE.Group();
+    leftArmPivot.position.set(-0.42, 1.7, 0);
+    const leftArm = new THREE.Mesh(armGeo, armMat);
+    leftArm.position.y = -0.35;
+    leftArmPivot.add(leftArm);
+    group.add(leftArmPivot);
+
+    const rightArmPivot = new THREE.Group();
+    rightArmPivot.position.set(0.42, 1.7, 0);
+    const rightArm = new THREE.Mesh(armGeo, armMat);
+    rightArm.position.y = -0.35;
+    rightArmPivot.add(rightArm);
+    group.add(rightArmPivot);
+
+    // Save limbs for animation
+    group.leftLegPivot = leftLegPivot;
+    group.rightLegPivot = rightLegPivot;
+    group.leftArmPivot = leftArmPivot;
+    group.rightArmPivot = rightArmPivot;
+    group.lastPos = group.position.clone();
+
+    this.scene.add(group as unknown as THREE.Object3D);
+    return group;
+  }
+
+  private spawnTeams() {
+    const gswRoster: PlayerData[] = [
+      { id: 'curry', name: 'S. CURRY', number: '30', team: 'GSW', position: 'PG', threePointRating: 99, midRangeRating: 96, speed: 4.8 },
+      { id: 'thompson', name: 'K. THOMPSON', number: '11', team: 'GSW', position: 'SG', threePointRating: 92, midRangeRating: 90, speed: 4.4 },
+      { id: 'wiggins', name: 'A. WIGGINS', number: '22', team: 'GSW', position: 'SF', threePointRating: 84, midRangeRating: 85, speed: 4.6 },
+      { id: 'green', name: 'D. GREEN', number: '23', team: 'GSW', position: 'PF', threePointRating: 75, midRangeRating: 78, speed: 4.2 },
+      { id: 'looney', name: 'K. LOONEY', number: '5', team: 'GSW', position: 'C', threePointRating: 60, midRangeRating: 72, speed: 3.8 },
+    ];
+
+    const houRoster: PlayerData[] = [
+      { id: 'vanvleet', name: 'F. VANVLEET', number: '5', team: 'HOU', position: 'PG', threePointRating: 88, midRangeRating: 86, speed: 4.5 },
+      { id: 'green_j', name: 'J. GREEN', number: '4', team: 'HOU', position: 'SG', threePointRating: 85, midRangeRating: 84, speed: 4.9 },
+      { id: 'brooks', name: 'D. BROOKS', number: '9', team: 'HOU', position: 'SF', threePointRating: 82, midRangeRating: 81, speed: 4.4 },
+      { id: 'smith', name: 'J. SMITH JR.', number: '10', team: 'HOU', position: 'PF', threePointRating: 84, midRangeRating: 82, speed: 4.3 },
+      { id: 'sengun', name: 'A. SENGUN', number: '28', team: 'HOU', position: 'C', threePointRating: 70, midRangeRating: 85, speed: 3.9 },
+    ];
+
+    // Spawn GSW
+    const gswStarts = [
+      new THREE.Vector3(0, 0, 2),
+      new THREE.Vector3(-4.5, 0, -3),
+      new THREE.Vector3(4.5, 0, -3),
+      new THREE.Vector3(-2.5, 0, -7),
+      new THREE.Vector3(2.5, 0, -8),
+    ];
+    gswRoster.forEach((data, i) => {
+      const p = this.createPlayerMesh(data);
+      p.position.copy(gswStarts[i]);
+      this.players.push(p);
+    });
+
+    // Spawn HOU
+    const houStarts = [
+      new THREE.Vector3(0, 0, -1),
+      new THREE.Vector3(-4.0, 0, -4.5),
+      new THREE.Vector3(4.0, 0, -4.5),
+      new THREE.Vector3(-2.2, 0, -8),
+      new THREE.Vector3(2.2, 0, -9),
+    ];
+    houRoster.forEach((data, i) => {
+      const p = this.createPlayerMesh(data);
+      p.position.copy(houStarts[i]);
+      this.players.push(p);
+    });
+
+    this.controlledPlayer = this.players[0]; // Curry
+    this.updateControlledNameplate(this.controlledPlayer);
+  }
+
+  // ----------------------------------------------------
+  // INPUT & CONTROLS
+  // ----------------------------------------------------
+  private onKeyDown = (e: KeyboardEvent) => {
+    this.keys[e.key.toLowerCase()] = true;
+
+    // Shot meter charge
+    if (e.key === ' ' && this.ballHolder === this.controlledPlayer && !this.isBallInFlight) {
+      if (!this.isChargingShot) {
+        this.isChargingShot = true;
+        this.shotHoldTime = 0;
+      }
+    }
+
+    // Pass
+    if ((e.key.toLowerCase() === 'x' || e.key.toLowerCase() === 'e') && this.ballHolder === this.controlledPlayer) {
+      this.passToBestTeammate(this.controlledPlayer);
+    }
+
+    // Switch controlled player on defense or when off-ball
+    if (e.key.toLowerCase() === 'c' || e.key.toLowerCase() === 'q') {
+      this.cycleControlledPlayer();
+    }
+  };
+
+  private onKeyUp = (e: KeyboardEvent) => {
+    this.keys[e.key.toLowerCase()] = false;
+
+    // Release shot
+    if (e.key === ' ' && this.isChargingShot) {
+      this.isChargingShot = false;
+      this.releaseShot(this.controlledPlayer, this.shotHoldTime);
+    }
+  };
+
+  private cycleControlledPlayer() {
+    const teammates = this.players.filter(p => p.data.team === 'GSW' && p !== this.controlledPlayer);
+    if (teammates.length > 0) {
+      this.controlledPlayer = teammates[0];
+      this.updateControlledNameplate(this.controlledPlayer);
+    }
+  }
+
+  // ----------------------------------------------------
+  // (1) SHOOTING & 100% GREEN RELEASE LOGIC
+  // ----------------------------------------------------
+  private releaseShot(shooter: PlayerMesh, holdDuration: number) {
+    if (this.ballHolder !== shooter) return;
+
+    this.ballHolder = null;
+    this.isBallInFlight = true;
+
+    // Target rim
+    const targetHoop = shooter.data.team === 'GSW' ? this.gswHoopPos : this.houHoopPos;
+    const distToHoop = new THREE.Vector2(shooter.position.x - targetHoop.x, shooter.position.z - targetHoop.z).length();
+    const isThree = distToHoop > 7.0;
+    const points = isThree ? 3 : 2;
+
+    // Timing evaluation (ideal release is ~0.65s)
+    const ideal = 0.65;
+    const diff = Math.abs(holdDuration - ideal);
+    const isGreen = diff < 0.05; // Perfect release
+
+    let quality = 'LATE';
+    if (isGreen) {
+      quality = 'GREEN RELEASE! PERFECT';
+    } else if (diff < 0.14) {
+      quality = 'SLIGHTLY EARLY / LATE';
+    } else {
+      quality = holdDuration < ideal ? 'VERY EARLY' : 'VERY LATE';
+    }
+
+    // Contest check
+    const nearestOpponent = this.getNearestDefender(shooter);
+    const defenderDist = nearestOpponent ? nearestOpponent.position.distanceTo(shooter.position) : 99;
+    const isContested = defenderDist < 2.0;
+
+    // (1) CRITICAL FIX: Green Release MUST be 100% make probability
+    let willMake = false;
+    if (isGreen) {
+      willMake = true; // 100% ALWAYS GOES IN
+    } else {
+      const baseRating = isThree ? shooter.data.threePointRating : shooter.data.midRangeRating;
+      let makeProb = (baseRating / 100) * 0.75 - diff * 2.0;
+      if (isContested) makeProb -= 0.35;
+      willMake = Math.random() < Math.max(0.08, makeProb);
+    }
+
+    // Visual / UI callback
+    if (shooter === this.controlledPlayer) {
+      this.onShotReleased?.(quality, isGreen);
+    }
+
+    // Arc trajectory
+    this.activeShot = {
+      startPos: this.ball.position.clone(),
+      targetHoop: targetHoop.clone(),
+      progress: 0,
+      duration: 1.15,
+      peakHeight: Math.max(5.2, targetHoop.y + 2.5),
+      isGreen,
+      points,
+      shooterTeam: shooter.data.team,
+      willMake,
+    };
+  }
+
+  // ----------------------------------------------------
+  // (1) FLOATING TEXT POPUP (+2 / +3) & CONFETTI
+  // ----------------------------------------------------
+  private spawnFloatingScore(points: number, hoopPos: THREE.Vector3) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 128;
+    canvas.height = 64;
+    const ctx = canvas.getContext('2d')!;
+
+    ctx.fillStyle = '#ffeb3b';
+    ctx.font = 'bold 44px Impact, system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.shadowColor = 'rgba(0,0,0,0.8)';
+    ctx.shadowBlur = 8;
+    ctx.fillText(`+${points}`, 64, 32);
+
+    const texture = new THREE.CanvasTexture(canvas);
+    const spriteMat = new THREE.SpriteMaterial({
+      map: texture,
+      transparent: true,
+      opacity: 1.0,
+      depthTest: false,
+    });
+    const sprite = new THREE.Sprite(spriteMat);
+    sprite.scale.set(1.6, 0.8, 1);
+    sprite.position.set(hoopPos.x, hoopPos.y + 1.2, hoopPos.z);
+    this.scene.add(sprite);
+
+    this.floatingTexts.push({ sprite, lifetime: 0, maxLife: 1.2 });
+  }
+
+  private spawnGreenConfetti(pos: THREE.Vector3) {
+    const colors = [0x00ff66, 0x39ff14, 0xffeb3b, 0xffffff];
+    for (let i = 0; i < 35; i++) {
+      const geo = new THREE.PlaneGeometry(0.12, 0.12);
+      const mat = new THREE.MeshBasicMaterial({
+        color: colors[Math.floor(Math.random() * colors.length)],
+        side: THREE.DoubleSide,
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.copy(pos);
+
+      const vel = new THREE.Vector3(
+        (Math.random() - 0.5) * 4.5,
+        Math.random() * 4.0 + 2.0,
+        (Math.random() - 0.5) * 4.5
+      );
+      this.scene.add(mesh);
+      this.confettiParticles.push({ mesh, vel, life: 1.0 });
+    }
+  }
+
+  // ----------------------------------------------------
+  // (5) ACTIVE AI OFFENSE & MAN-TO-MAN DEFENSE
+  // ----------------------------------------------------
+  private updateHoustonAI(dt: number) {
+    const houPlayers = this.players.filter(p => p.data.team === 'HOU');
+    const gswPlayers = this.players.filter(p => p.data.team === 'GSW');
+    const isHouOffense = this.ballHolder && this.ballHolder.data.team === 'HOU';
+
+    this.aiDecisionTimer += dt;
+    this.aiPassTimer += dt;
+
+    if (isHouOffense && this.ballHolder) {
+      const carrier = this.ballHolder;
+      const targetRim = this.houHoopPos;
+
+      // 1. Dribble toward scoring range
+      const toRim = new THREE.Vector3().subVectors(targetRim, carrier.position);
+      toRim.y = 0;
+      const distToRim = toRim.length();
+
+      if (distToRim > 5.5) {
+        toRim.normalize();
+        carrier.position.addScaledVector(toRim, carrier.data.speed * 0.75 * dt);
+        carrier.lookAt(targetRim.x, carrier.position.y, targetRim.z);
+      }
+
+      // Check contest
+      const defender = this.getNearestDefender(carrier);
+      const defDist = defender ? defender.position.distanceTo(carrier.position) : 99;
+
+      // 2. Pass between teammates if contested or possession flows
+      if (this.aiPassTimer > 3.0 || (defDist < 1.8 && this.aiDecisionTimer > 1.2)) {
+        this.aiPassTimer = 0;
+        this.passToBestTeammate(carrier);
+      }
+
+      // 3. Attempt shots within shot clock or when in sweet spot
+      const inGoodRange = distToRim <= 6.5;
+      const openShot = defDist > 2.3 && inGoodRange;
+      const clockExpiring = this.shotClock < 3.5;
+
+      if ((openShot || clockExpiring || (inGoodRange && this.aiDecisionTimer > 4.5)) && !this.isBallInFlight) {
+        this.aiDecisionTimer = 0;
+        // AI executes a timed release
+        const simHold = 0.65 + (Math.random() - 0.5) * 0.12;
+        this.releaseShot(carrier, simHold);
+      }
+    }
+
+    // (5) Defenders stay between their man and the basket
+    this.players.forEach(p => {
+      if (p === this.ballHolder) return;
+
+      const isDefense = this.ballHolder ? p.data.team !== this.ballHolder.data.team : p.data.team === 'HOU';
+      if (isDefense) {
+        // Find assigned offensive matchup
+        const opponents = p.data.team === 'HOU' ? gswPlayers : houPlayers;
+        const myMatchup = opponents.find(opp => opp.data.position === p.data.position) || opponents[0];
+        const rimToDefend = p.data.team === 'HOU' ? this.gswHoopPos : this.houHoopPos;
+
+        // Position strictly between matchup and basket
+        const dirToHoop = new THREE.Vector3().subVectors(rimToDefend, myMatchup.position).normalize();
+        const idealGuardPos = myMatchup.position.clone().addScaledVector(dirToHoop, 1.8);
+
+        const moveDir = new THREE.Vector3().subVectors(idealGuardPos, p.position);
+        moveDir.y = 0;
+        if (moveDir.length() > 0.2) {
+          moveDir.normalize();
+          p.position.addScaledVector(moveDir, p.data.speed * 0.8 * dt);
+          p.lookAt(myMatchup.position.x, p.position.y, myMatchup.position.z);
         }
       }
-
-      if (isOpen) return teammate;
-    }
-    return null;
-  }
-
-  private executePass(from: Player, to: Player): void {
-    // Simple pass: move target player slightly toward ball
-    const direction = to.position.clone().sub(from.position).normalize();
-    to.body.velocity.set(direction.x * 4, 0, direction.z * 4);
-  }
-
-  // FIX #5: Defenders stay between their man and the basket
-  private updateDefense(): void {
-    const warriors = Array.from(this.players.values()).filter(p => p.team === 'warriors');
-    const rockets = Array.from(this.players.values()).filter(p => p.team === 'rockets');
-
-    // Assign loose matchups
-    for (let i = 0; i < warriors.length && i < rockets.length; i++) {
-      const defender = warriors[i];
-      const attacker = rockets[i];
-
-      // FIX #5: Move defender between attacker and goal
-      const basketPos = new THREE.Vector3(41, 0, 0); // Warriors defending this goal
-      const midpoint = new THREE.Vector3()
-        .addVectors(attacker.position, basketPos)
-        .multiplyScalar(0.5);
-
-      const direction = midpoint.clone().sub(defender.position).normalize();
-      defender.body.velocity.set(direction.x * 4, 0, direction.z * 4);
-
-      // Add some random variation to avoid stiff movement
-      defender.body.velocity.x += (Math.random() - 0.5) * 0.5;
-      defender.body.velocity.z += (Math.random() - 0.5) * 0.5;
-    }
-  }
-
-  // ========================================================================
-  // PLAYER CONTROL & INPUT
-  // ========================================================================
-
-  private attachEventListeners(): void {
-    window.addEventListener('resize', () => this.onWindowResize());
-
-    // Joystick for movement
-    const joystickBase = document.querySelector('.joystick-base') as HTMLElement;
-    if (joystickBase) {
-      joystickBase.addEventListener('touchmove', (e) => this.handleJoystick(e));
-      joystickBase.addEventListener('mousemove', (e) => this.handleJoystick(e));
-      joystickBase.addEventListener('touchend', () => this.resetJoystick());
-      joystickBase.addEventListener('mouseleave', () => this.resetJoystick());
-    }
-
-    // Shoot button
-    document.addEventListener('keydown', (e) => {
-      if (e.key === ' ') {
-        this.attemptShot(Math.random() * 0.2 - 0.1);
-      }
     });
   }
 
-  private handleJoystick(event: TouchEvent | MouseEvent): void {
-    if (!this.controlledPlayerId) return;
-    const player = this.players.get(this.controlledPlayerId);
-    if (!player) return;
+  private passToBestTeammate(passer: PlayerMesh) {
+    const teammates = this.players.filter(p => p.data.team === passer.data.team && p !== passer);
+    if (teammates.length === 0) return;
 
-    let clientX = 0, clientY = 0;
-    if (event instanceof TouchEvent) {
-      clientX = event.touches[0]?.clientX || 0;
-      clientY = event.touches[0]?.clientY || 0;
-    } else {
-      clientX = event.clientX;
-      clientY = event.clientY;
-    }
+    // Pick open teammate
+    let best = teammates[0];
+    let maxDistToOpp = -1;
 
-    // Simple directional input
-    const moveX = (clientX - window.innerWidth * 0.1) / (window.innerWidth * 0.2);
-    const moveZ = (clientY - window.innerHeight * 0.9) / (window.innerHeight * 0.2);
-
-    player.body.velocity.set(moveX * 8, 0, moveZ * 8);
-    player.isRunning = true;
-  }
-
-  private resetJoystick(): void {
-    if (!this.controlledPlayerId) return;
-    const player = this.players.get(this.controlledPlayerId);
-    if (player) {
-      player.body.velocity.set(0, 0, 0);
-      player.isRunning = false;
-      player.legRotation = 0;
-    }
-  }
-
-  // ========================================================================
-  // ANIMATION & RENDERING
-  // ========================================================================
-
-  // FIX #4: Running animation - swing legs back and forth
-  private updatePlayerAnimations(): void {
-    this.players.forEach(player => {
-      if (!player.isRunning) {
-        player.legRotation = 0;
-        return;
+    teammates.forEach(tm => {
+      const opp = this.getNearestDefender(tm);
+      const d = opp ? opp.position.distanceTo(tm.position) : 99;
+      if (d > maxDistToOpp) {
+        maxDistToOpp = d;
+        best = tm;
       }
-
-      // Animate leg swing
-      player.legRotation += 0.2; // Speed of animation
-      const leftLeg = player.mesh.getObjectByName('left-leg');
-      const rightLeg = player.mesh.getObjectByName('right-leg');
-
-      if (leftLeg) {
-        leftLeg.rotation.z = Math.sin(player.legRotation) * 0.4; // Swing amplitude
-      }
-      if (rightLeg) {
-        rightLeg.rotation.z = Math.sin(player.legRotation + Math.PI) * 0.4;
-      }
-
-      // Update nameplate
-      this.updatePlayerNameplate(player);
     });
-  }
 
-  // FIX #2: Move/re-parent nameplate to controlled player instead of creating new one
-  private updatePlayerNameplate(player: Player): void {
-    if (!player.nameplate) return;
-
-    player.nameplate.style.display = 'block';
-    const screenPos = this.worldToScreen(player.position);
-    player.nameplate.style.left = screenPos.x + 'px';
-    player.nameplate.style.top = screenPos.y + 'px';
-
-    const staminaFill = player.nameplate.querySelector('.stamina-fill') as HTMLElement;
-    if (staminaFill) {
-      const staminaPercent = (player.stamina / player.maxStamina) * 100;
-      staminaFill.style.width = staminaPercent + '%';
+    this.ballHolder = best;
+    if (passer.data.team === 'GSW') {
+      this.controlledPlayer = best;
+      this.updateControlledNameplate(this.controlledPlayer);
     }
   }
 
-  private worldToScreen(worldPos: THREE.Vector3): { x: number; y: number } {
-    const vector = worldPos.clone().project(this.camera);
-    const x = (vector.x * 0.5 + 0.5) * window.innerWidth;
-    const y = (-(vector.y) * 0.5 + 0.5) * window.innerHeight;
-    return { x, y };
+  private getNearestDefender(player: PlayerMesh): PlayerMesh | null {
+    const opponents = this.players.filter(p => p.data.team !== player.data.team);
+    let nearest: PlayerMesh | null = null;
+    let minDist = 999;
+    opponents.forEach(opp => {
+      const d = opp.position.distanceTo(player.position);
+      if (d < minDist) {
+        minDist = d;
+        nearest = opp;
+      }
+    });
+    return nearest;
   }
 
-  private updateScoreboard(): void {
-    const awayScore = document.querySelector('.team-score-num.away-team');
-    const homeScore = document.querySelector('.team-score-num.home-team');
+  // ----------------------------------------------------
+  // (4) RUNNING ANIMATION & GAME LOOP
+  // ----------------------------------------------------
+  private updatePlayerMovement(dt: number) {
+    // User movement
+    if (this.controlledPlayer) {
+      const move = new THREE.Vector3();
+      if (this.keys['w'] || this.keys['arrowup']) move.z -= 1;
+      if (this.keys['s'] || this.keys['arrowdown']) move.z += 1;
+      if (this.keys['a'] || this.keys['arrowleft']) move.x -= 1;
+      if (this.keys['d'] || this.keys['arrowright']) move.x += 1;
 
-    if (awayScore) awayScore.textContent = String(this.gameState.score.warriors);
-    if (homeScore) homeScore.textContent = String(this.gameState.score.rockets);
+      if (move.lengthSq() > 0) {
+        move.normalize();
+        this.controlledPlayer.position.addScaledVector(move, this.controlledPlayer.data.speed * dt);
+        this.controlledPlayer.lookAt(
+          this.controlledPlayer.position.x + move.x,
+          this.controlledPlayer.position.y,
+          this.controlledPlayer.position.z + move.z
+        );
+      }
+    }
+
+    // Swing player legs back and forth when moving
+    this.players.forEach(p => {
+      const vel = new THREE.Vector3().subVectors(p.position, p.lastPos);
+      vel.y = 0;
+      const speed = vel.length() / Math.max(dt, 0.001);
+
+      if (speed > 0.25) {
+        p.runCycle += dt * speed * 4.5;
+        const swing = Math.sin(p.runCycle) * 0.65;
+        p.leftLegPivot.rotation.x = swing;
+        p.rightLegPivot.rotation.x = -swing;
+        p.leftArmPivot.rotation.x = -swing * 0.75;
+        p.rightArmPivot.rotation.x = swing * 0.75;
+      } else {
+        // Return smoothly to idle stance
+        p.leftLegPivot.rotation.x *= Math.max(0, 1 - dt * 10);
+        p.rightLegPivot.rotation.x *= Math.max(0, 1 - dt * 10);
+        p.leftArmPivot.rotation.x *= Math.max(0, 1 - dt * 10);
+        p.rightArmPivot.rotation.x *= Math.max(0, 1 - dt * 10);
+      }
+
+      p.lastPos.copy(p.position);
+    });
+
+    // Update single active nameplate position
+    if (this.controlledPlayer && this.nameplateSprite) {
+      this.nameplateSprite.position.set(
+        this.controlledPlayer.position.x,
+        this.controlledPlayer.position.y + 2.55,
+        this.controlledPlayer.position.z
+      );
+    }
   }
 
-  // FIX #3: Remove tip-off modal fully after fade animation
-  public hideTipOffModal(): void {
-    const modal = document.querySelector('.modal-overlay') as HTMLElement;
-    if (!modal) return;
-
-    modal.classList.remove('open');
-    setTimeout(() => {
-      modal.style.display = 'none';
-      modal.remove();
-    }, 300);
-  }
-
-  private animate = (): void => {
-    requestAnimationFrame(this.animate);
-
-    if (!this.gameState.gameActive) {
-      this.renderer.render(this.scene, this.camera);
+  private updateShotPhysics(dt: number) {
+    if (!this.isBallInFlight || !this.activeShot) {
+      if (this.ballHolder) {
+        // Dribble bounce
+        const t = performance.now() * 0.008;
+        const bounce = Math.abs(Math.sin(t)) * 0.45;
+        const offset = new THREE.Vector3(0.35, 0.6 + bounce, 0.25);
+        this.ball.position.copy(this.ballHolder.position).add(offset);
+      }
       return;
     }
 
-    // Update physics
-    this.world.step(1 / 60);
+    const shot = this.activeShot;
+    shot.progress += dt / shot.duration;
 
-    // Sync visuals to physics
-    this.players.forEach(player => {
-      player.position.copy(player.body.position);
-      player.mesh.position.copy(player.body.position);
-    });
+    if (shot.progress < 1.0) {
+      // Parabolic arc toward rim
+      const currentPos = new THREE.Vector3().lerpVectors(shot.startPos, shot.targetHoop, shot.progress);
+      const arc = Math.sin(shot.progress * Math.PI) * (shot.peakHeight - shot.startPos.y);
+      currentPos.y += arc;
+      this.ball.position.copy(currentPos);
+    } else {
+      // Shot arrives at basket
+      this.isBallInFlight = false;
+      this.activeShot = null;
 
-    if (this.ball) {
-      this.ball.mesh.position.copy(this.ball.body.position);
+      if (shot.willMake) {
+        // (1) MAKE BASKET -> Update Score & trigger floating popup
+        if (shot.shooterTeam === 'GSW') {
+          this.homeScore += shot.points;
+        } else {
+          this.awayScore += shot.points;
+        }
+
+        // Scoreboard callback guaranteed
+        this.onScoreUpdate?.(this.homeScore, this.awayScore, shot.points, shot.shooterTeam);
+
+        // Floating popup near hoop
+        this.spawnFloatingScore(shot.points, shot.targetHoop);
+
+        // (1) Confetti burst ONLY for green releases
+        if (shot.isGreen) {
+          this.spawnGreenConfetti(shot.targetHoop);
+        }
+
+        // Inbound / switch ball possession
+        this.resetPossessionAfterScore(shot.shooterTeam === 'GSW' ? 'HOU' : 'GSW');
+      } else {
+        // Missed shot rebound
+        this.ballVelocity.set((Math.random() - 0.5) * 3, 3, (Math.random() - 0.5) * 3);
+        this.resetPossessionAfterScore('HOU');
+      }
+
+      this.shotClock = 24.0;
+    }
+  }
+
+  private resetPossessionAfterScore(nextTeam: 'GSW' | 'HOU') {
+    const nextHolder = this.players.find(p => p.data.team === nextTeam);
+    if (nextHolder) {
+      this.ballHolder = nextHolder;
+      if (nextTeam === 'GSW') {
+        this.controlledPlayer = nextHolder;
+        this.updateControlledNameplate(this.controlledPlayer);
+      }
+    }
+  }
+
+  private updateVFX(dt: number) {
+    // Floating texts
+    for (let i = this.floatingTexts.length - 1; i >= 0; i--) {
+      const ft = this.floatingTexts[i];
+      ft.lifetime += dt;
+      ft.sprite.position.y += dt * 1.5;
+      const mat = ft.sprite.material as THREE.SpriteMaterial;
+      mat.opacity = Math.max(0, 1 - ft.lifetime / ft.maxLife);
+
+      if (ft.lifetime >= ft.maxLife) {
+        this.scene.remove(ft.sprite);
+        this.floatingTexts.splice(i, 1);
+      }
     }
 
-    // Game logic
-    this.updatePlayerAnimations(); // FIX #4
-    this.updateAIOffense(); // FIX #5
-    this.updateDefense(); // FIX #5
-    this.gameState.shotClock -= 1 / 60;
+    // Confetti particles
+    for (let i = this.confettiParticles.length - 1; i >= 0; i--) {
+      const c = this.confettiParticles[i];
+      c.life -= dt;
+      c.mesh.position.addScaledVector(c.vel, dt);
+      c.vel.y -= 9.8 * dt; // gravity
+      c.mesh.rotation.x += dt * 5;
+      c.mesh.rotation.y += dt * 7;
 
-    // Render confetti
-    const confettiCanvas = document.getElementById('confetti-canvas') as HTMLCanvasElement;
-    if (confettiCanvas) {
-      const ctx = confettiCanvas.getContext('2d');
-      if (ctx) {
-        ctx.clearRect(0, 0, confettiCanvas.width, confettiCanvas.height);
-        this.confettiParticles = this.confettiParticles.filter(p => p.draw());
+      if (c.life <= 0) {
+        this.scene.remove(c.mesh);
+        this.confettiParticles.splice(i, 1);
       }
+    }
+  }
+
+  private animate = (timestamp: number) => {
+    requestAnimationFrame(this.animate);
+    const dt = 0.016; // 60 FPS
+
+    if (!this.isGameOver) {
+      // Clocks
+      this.shotClock = Math.max(0, this.shotClock - dt);
+      this.gameClock = Math.max(0, this.gameClock - dt);
+      this.onShotClockUpdate?.(Math.ceil(this.shotClock));
+
+      // Charge meter
+      if (this.isChargingShot) {
+        this.shotHoldTime += dt;
+        this.onShotMeterUpdate?.(Math.min(1.0, this.shotHoldTime / 0.65), true);
+      } else {
+        this.onShotMeterUpdate?.(0, false);
+      }
+
+      this.updatePlayerMovement(dt);
+      this.updateHoustonAI(dt);
+      this.updateShotPhysics(dt);
+      this.updateVFX(dt);
     }
 
     this.renderer.render(this.scene, this.camera);
   };
 
-  private onWindowResize(): void {
-    const width = window.innerWidth;
-    const height = window.innerHeight;
-    (this.camera as THREE.PerspectiveCamera).aspect = width / height;
-    (this.camera as THREE.PerspectiveCamera).updateProjectionMatrix();
-    this.renderer.setSize(width, height);
-  }
+  private onResize = () => {
+    if (!this.container) return;
+    this.camera.aspect = this.container.clientWidth / this.container.clientHeight;
+    this.camera.updateProjectionMatrix();
+    this.renderer.setSize(this.container.clientWidth, this.container.clientHeight);
+  };
 
-  public startGame(): void {
-    this.gameState.gameActive = true;
+  public destroy() {
+    window.removeEventListener('resize', this.onResize);
+    window.removeEventListener('keydown', this.onKeyDown);
+    window.removeEventListener('keyup', this.onKeyUp);
+    this.renderer.dispose();
   }
+}
+
+// Player Mesh Interface Extension
+interface PlayerMesh extends THREE.Group {
+  data: PlayerData;
+  runCycle: number;
+  lastPos: THREE.Vector3;
+  leftLegPivot: THREE.Group;
+  rightLegPivot: THREE.Group;
+  leftArmPivot: THREE.Group;
+  rightArmPivot: THREE.Group;
 }
