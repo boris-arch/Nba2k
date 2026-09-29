@@ -1,246 +1,172 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
-
-import { useEffect, useRef } from 'react';
-import { NBAGame } from './game';
+import React, { useEffect, useRef, useState } from 'react';
+import { BasketballGame } from './game';
 
 export default function App() {
   const containerRef = useRef<HTMLDivElement>(null);
-  const gameRef = useRef<NBAGame | null>(null);
+  const gameRef = useRef<BasketballGame | null>(null);
+
+  // Scoreboard
+  const [homeScore, setHomeScore] = useState(10);
+  const [awayScore, setAwayScore] = useState(8);
+  const [shotClock, setShotClock] = useState(24);
+
+  // Shot Meter & Feedback
+  const [meterValue, setMeterValue] = useState(0);
+  const [isCharging, setIsCharging] = useState(false);
+  const [shotFeedback, setShotFeedback] = useState<{ text: string; isGreen: boolean } | null>(null);
+
+  // (3) Tip-Off Menu Overlay State
+  const [tipOffStarted, setTipOffStarted] = useState(false);
+  const [tipOffFading, setTipOffFading] = useState(false);
+  const [tipOffMounted, setTipOffMounted] = useState(true);
 
   useEffect(() => {
     if (!containerRef.current) return;
 
-    // Initialize game
-    gameRef.current = new NBAGame(containerRef.current);
+    const game = new BasketballGame(containerRef.current);
+    gameRef.current = game;
 
-    // FIX #3: Hide tip-off modal and start game after brief delay
-    const tipOffBtn = document.querySelector('.loading-tipoff-btn') as HTMLElement;
-    if (tipOffBtn) {
-      tipOffBtn.addEventListener('click', () => {
-        gameRef.current?.hideTipOffModal();
-        // Fade out loading screen
-        const loadingScreen = document.getElementById('loading-screen');
-        if (loadingScreen) {
-          loadingScreen.classList.add('loaded');
-        }
-        // Start game
-        setTimeout(() => {
-          gameRef.current?.startGame();
-        }, 500);
-      });
-    }
-
-    // Handle window resize
-    const handleResize = () => {
-      if (gameRef.current) {
-        // Game handles its own resize logic
-      }
+    // (1) Listen to verified scoreboard updates
+    game.onScoreUpdate = (home, away, points, team) => {
+      setHomeScore(home);
+      setAwayScore(away);
     };
 
-    window.addEventListener('resize', handleResize);
+    game.onShotMeterUpdate = (val, charging) => {
+      setMeterValue(val);
+      setIsCharging(charging);
+    };
+
+    game.onShotReleased = (quality, isGreen) => {
+      setShotFeedback({ text: quality, isGreen });
+      setTimeout(() => {
+        setShotFeedback(null);
+      }, 1500);
+    };
+
+    game.onShotClockUpdate = (sec) => {
+      setShotClock(sec);
+    };
 
     return () => {
-      window.removeEventListener('resize', handleResize);
+      game.destroy();
     };
   }, []);
 
+  // (3) Fix for Tip-Off Menu overlay bleed-through
+  const handleStartTipOff = () => {
+    setTipOffStarted(true);
+    setTipOffFading(true);
+
+    // After animation completes, completely unmount from DOM
+    setTimeout(() => {
+      setTipOffMounted(false);
+      setTipOffFading(false);
+    }, 600);
+  };
+
   return (
-    <div style={{ width: '100%', height: '100vh', margin: 0, padding: 0 }}>
-      <div
-        ref={containerRef}
-        id="canvas-container"
-        style={{
-          position: 'absolute',
-          top: 0,
-          left: 0,
-          width: '100%',
-          height: '100%'
-        }}
-      />
-      <div id="hud-layer" style={{ position: 'absolute', inset: 0, zIndex: 10, pointerEvents: 'none' }}>
-        {/* Scorebug */}
+    <div className="relative w-screen h-screen overflow-hidden bg-black select-none font-sans">
+      {/* 3D Canvas */}
+      <div ref={containerRef} className="w-full h-full" />
+
+      {/* TOP SCOREBOARD */}
+      <div className="absolute top-5 left-1/2 -translate-x-1/2 flex items-center bg-slate-900/90 border border-slate-700 backdrop-blur-md rounded-2xl px-6 py-3 shadow-2xl text-white z-20">
+        <div className="flex items-center space-x-3 mr-6">
+          <div className="w-3.5 h-3.5 rounded-full bg-blue-500 animate-pulse" />
+          <span className="font-extrabold tracking-wider text-xl text-yellow-400">GSW</span>
+          <span className="text-3xl font-black">{homeScore}</span>
+        </div>
+
+        <div className="flex flex-col items-center px-4 border-x border-slate-700">
+          <span className="text-xs uppercase tracking-widest text-slate-400 font-semibold">Shot Clock</span>
+          <span className={`text-2xl font-mono font-bold ${shotClock <= 5 ? 'text-red-500 animate-bounce' : 'text-emerald-400'}`}>
+            {shotClock}
+          </span>
+        </div>
+
+        <div className="flex items-center space-x-3 ml-6">
+          <span className="text-3xl font-black">{awayScore}</span>
+          <span className="font-extrabold tracking-wider text-xl text-red-500">HOU</span>
+          <div className="w-3.5 h-3.5 rounded-full bg-red-600" />
+        </div>
+      </div>
+
+      {/* SHOT RELEASE FEEDBACK */}
+      {shotFeedback && (
         <div
-          className="broadcast-scorebug-container"
-          style={{
-            position: 'absolute',
-            bottom: 'max(16px, env(safe-area-inset-bottom))',
-            right: 'max(16px, env(safe-area-inset-right))',
-            zIndex: 20
-          }}
+          className={`absolute top-28 left-1/2 -translate-x-1/2 px-6 py-2 rounded-xl text-lg font-black tracking-wider uppercase shadow-xl transition-all scale-110 z-20 ${
+            shotFeedback.isGreen
+              ? 'bg-emerald-500 text-white ring-4 ring-emerald-300 animate-pulse'
+              : 'bg-yellow-500 text-slate-950'
+          }`}
         >
-          <div className="nba-scorebug-card">
-            <div className="scorebug-row away-team">
-              <div className="team-icon-decal">🔵</div>
-              <div className="team-code">GSW</div>
-              <div className="team-possession-dot"></div>
-              <div className="team-score-num away-team">0</div>
-            </div>
-            <div className="scorebug-row home-team">
-              <div className="team-icon-decal">🔴</div>
-              <div className="team-code">HOU</div>
-              <div className="team-possession-dot"></div>
-              <div className="team-score-num home-team">0</div>
-            </div>
-            <div className="scorebug-footer">
-              <span className="quarter-txt">Q1</span>
-              <span className="game-time-txt">12:00</span>
-              <span className="shot-clock-tag">24</span>
-            </div>
-          </div>
+          {shotFeedback.text}
         </div>
+      )}
 
-        {/* Vertical Shot Meter */}
+      {/* 2K SHOT METER */}
+      {isCharging && (
+        <div className="absolute bottom-28 left-1/2 -translate-x-1/2 w-48 flex flex-col items-center z-20">
+          <div className="w-full bg-slate-800/90 h-4 rounded-full border border-slate-600 overflow-hidden relative shadow-lg">
+            <div
+              className={`h-full transition-all duration-75 ${
+                meterValue > 0.92 ? 'bg-emerald-400 shadow-emerald-400/50' : 'bg-yellow-400'
+              }`}
+              style={{ width: `${meterValue * 100}%` }}
+            />
+            {/* Green Perfect Notch */}
+            <div className="absolute top-0 right-[4%] w-2 h-full bg-emerald-300" />
+          </div>
+          <span className="text-xs text-slate-300 mt-1.5 font-bold tracking-wider uppercase">
+            Release on Green
+          </span>
+        </div>
+      )}
+
+      {/* CONTROLS GUIDE */}
+      <div className="absolute bottom-5 left-5 bg-slate-900/80 backdrop-blur-sm border border-slate-800 rounded-xl p-3 text-xs text-slate-300 space-y-1 z-10 hidden sm:block">
+        <p><kbd className="bg-slate-800 px-1.5 py-0.5 rounded text-white font-mono">WASD / Arrows</kbd> Move</p>
+        <p><kbd className="bg-slate-800 px-1.5 py-0.5 rounded text-white font-mono">SPACE</kbd> Shoot (Hold & Time Release)</p>
+        <p><kbd className="bg-slate-800 px-1.5 py-0.5 rounded text-white font-mono">X / E</kbd> Pass</p>
+        <p><kbd className="bg-slate-800 px-1.5 py-0.5 rounded text-white font-mono">C / Q</kbd> Switch Player</p>
+      </div>
+
+      {/* (3) TIP-OFF OVERLAY: FULLY UNMOUNTED AFTER FADE */}
+      {tipOffMounted && (
         <div
-          id="vertical-shot-meter"
-          style={{
-            position: 'absolute',
-            transform: 'translate(-50%, -100%)',
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            opacity: 0,
-            pointerEvents: 'none',
-            zIndex: 35
-          }}
+          className={`absolute inset-0 flex flex-col items-center justify-center bg-slate-950/80 backdrop-blur-md z-50 transition-opacity duration-500 ease-out ${
+            tipOffFading ? 'opacity-0 pointer-events-none' : 'opacity-100'
+          }`}
+          style={tipOffFading ? { display: 'none' } : undefined}
         >
-          <div className="v-meter-track">
-            <div className="v-meter-green-zone"></div>
-            <div className="v-meter-fill"></div>
-            <div className="v-meter-needle"></div>
+          <div className="bg-slate-900/90 border border-slate-700 p-8 rounded-3xl max-w-md w-full text-center shadow-2xl space-y-6">
+            <div className="space-y-2">
+              <h1 className="text-4xl font-black text-white tracking-wider">NBA 2K SHOWDOWN</h1>
+              <p className="text-sm font-semibold text-slate-400">GOLDEN STATE WARRIORS vs HOUSTON ROCKETS</p>
+            </div>
+
+            <div className="flex justify-around items-center py-4 bg-slate-800/50 rounded-2xl border border-slate-700/50">
+              <div className="text-center">
+                <span className="block text-2xl font-black text-yellow-400">GSW</span>
+                <span className="text-xs text-slate-400 font-bold">10 PTS</span>
+              </div>
+              <span className="text-slate-500 font-black text-xl">VS</span>
+              <div className="text-center">
+                <span className="block text-2xl font-black text-red-500">HOU</span>
+                <span className="text-xs text-slate-400 font-bold">8 PTS</span>
+              </div>
+            </div>
+
+            <button
+              onClick={handleStartTipOff}
+              className="w-full py-4 bg-gradient-to-r from-yellow-500 to-amber-600 hover:from-yellow-400 hover:to-amber-500 text-slate-950 font-black text-lg rounded-2xl shadow-xl transition-transform active:scale-95 cursor-pointer uppercase tracking-wider"
+            >
+              Start Tip-Off
+            </button>
           </div>
         </div>
-
-        {/* Floating Score Popup */}
-        <div
-          id="floating-score-popup"
-          style={{
-            position: 'absolute',
-            transform: 'translate(-50%, -50%)',
-            fontSize: '34px',
-            fontWeight: 900,
-            opacity: 0,
-            pointerEvents: 'none',
-            zIndex: 40,
-            textShadow: '0 0 16px rgba(251, 191, 36, 0.8)',
-            color: '#fbbf24'
-          }}
-        />
-
-        {/* Shot Feedback HUD */}
-        <div
-          id="shot-feedback-hud"
-          style={{
-            position: 'absolute',
-            top: '18%',
-            left: '50%',
-            transform: 'translate(-50%, -50%) scale(0.85)',
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            gap: '4px',
-            opacity: 0,
-            pointerEvents: 'none',
-            zIndex: 30
-          }}
-        />
-
-        {/* Referee Banner */}
-        <div
-          id="referee-banner"
-          style={{
-            position: 'absolute',
-            top: '26%',
-            left: '50%',
-            transform: 'translate(-50%, -50%) scale(0.9)',
-            background: 'rgba(220, 38, 38, 0.92)',
-            border: '2px solid #ffffff',
-            padding: '8px 24px',
-            borderRadius: '12px',
-            fontSize: '16px',
-            fontWeight: 900,
-            color: '#ffffff',
-            letterSpacing: '0.08em',
-            textTransform: 'uppercase',
-            boxShadow: '0 8px 24px rgba(0, 0, 0, 0.6)',
-            opacity: 0,
-            pointerEvents: 'none',
-            zIndex: 35
-          }}
-        />
-      </div>
-
-      {/* Touch Controls */}
-      <div className="touch-controls-container">
-        <div className="joystick-base">
-          <div className="joystick-thumb"></div>
-        </div>
-        <div className="action-buttons-group">
-          <button className="context-btn btn-shoot-3pt">SHOOT</button>
-          <button className="context-btn btn-action-pass">PASS</button>
-          <button className="context-btn btn-action-turbo">TURBO</button>
-        </div>
-      </div>
-
-      {/* Confetti Canvas */}
-      <canvas id="confetti-canvas" style={{ position: 'absolute', inset: 0, zIndex: 60, pointerEvents: 'none' }} />
-
-      {/* Loading Screen */}
-      <div id="loading-screen" style={{ position: 'absolute', inset: 0, zIndex: 100 }}>
-        <div className="loading-card">
-          <div className="loading-logo-row">
-            <div className="loading-2k-badge">2K</div>
-            <div className="loading-game-title">NBA 2K26</div>
-          </div>
-          <div className="loading-game-sub">Arena Broadcast Showdown</div>
-
-          <div className="loading-matchup">
-            <div className="loading-team warriors">
-              <div className="loading-team-icon">🔵</div>
-              <div className="loading-team-name">WARRIORS</div>
-              <div className="loading-star-name">S. Curry</div>
-            </div>
-            <div className="loading-vs-badge">VS</div>
-            <div className="loading-team rockets">
-              <div className="loading-team-icon">🔴</div>
-              <div className="loading-team-name">ROCKETS</div>
-              <div className="loading-star-name">J. Harden</div>
-            </div>
-          </div>
-
-          <div className="loading-progress-box">
-            <div className="loading-status-row">
-              <span id="loading-status-text">Initializing arena...</span>
-              <span id="loading-percentage">0%</span>
-            </div>
-            <div className="loading-bar-track">
-              <div className="loading-bar-fill" style={{ width: '100%' }}></div>
-            </div>
-          </div>
-
-          <button className="loading-tipoff-btn">TIP-OFF!</button>
-        </div>
-      </div>
-
-      {/* Modal Overlay for tip-off (FIX #3) */}
-      <div
-        className="modal-overlay"
-        style={{
-          position: 'absolute',
-          inset: 0,
-          zIndex: 50,
-          background: 'rgba(5, 8, 17, 0.88)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          padding: '16px',
-          opacity: 0,
-          pointerEvents: 'none',
-          transition: 'opacity 0.25s ease'
-        }}
-      />
+      )}
     </div>
   );
 }
