@@ -1,0 +1,2780 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <title>NBA 2K26: Arena Broadcast Showdown</title>
+    <meta
+      name="description"
+      content="Authentic NBA 2K-style 5v5 arena basketball simulation with gesture controls, context-sensitive actions, adaptive AI rotations, realistic ball physics, stamina, and signature 2K shot timing meter."
+    />
+    <meta property="og:title" content="NBA 2K26: Arena Broadcast Showdown" />
+    <meta
+      property="og:description"
+      content="Authentic NBA 2K-style 5v5 arena basketball simulation with gesture controls, context-sensitive actions, adaptive AI rotations, realistic ball physics, stamina, and signature 2K shot timing meter."
+    />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+
+    <!-- Standard ESM imports via CDNs in importmap -->
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+          "cannon-es": "https://unpkg.com/cannon-es@0.20.0/dist/cannon-es.js"
+        }
+      }
+    </script>
+
+    <style>
+      :root {
+        --2k-gold: #f59e0b;
+        --2k-green: #22c55e;
+        --2k-red: #ce1141;
+        --2k-blue: #1d428a;
+        --bg-dark: #070a12;
+      }
+
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+        -webkit-tap-highlight-color: transparent;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background-color: var(--bg-dark);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        color: #ffffff;
+        touch-action: none;
+      }
+
+      #canvas-container {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        z-index: 1;
+      }
+
+      #canvas-container canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+
+      /* 2D 2K HUD UI Overlay Layer */
+      #hud-layer {
+        position: absolute;
+        inset: 0;
+        z-index: 10;
+        pointer-events: none;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        padding: max(10px, env(safe-area-inset-top)) max(10px, env(safe-area-inset-right))
+          max(12px, env(safe-area-inset-bottom)) max(10px, env(safe-area-inset-left));
+      }
+
+      /* Top Header: 2K Logo, Camera Angle Switcher, VC Balance, Call Pick Button */
+      .top-nav {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        width: 100%;
+        pointer-events: auto;
+      }
+
+      .branding-box {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        background: rgba(15, 23, 42, 0.85);
+        backdrop-filter: blur(8px);
+        padding: 4px 10px;
+        border-radius: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+      }
+
+      .logo-2k-pill {
+        background: #ef4444;
+        color: #ffffff;
+        font-weight: 900;
+        font-size: 11px;
+        padding: 2px 6px;
+        border-radius: 4px;
+        letter-spacing: -0.05em;
+      }
+
+      .brand-title {
+        font-size: 12px;
+        font-weight: 800;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+
+      .top-actions {
+        display: flex;
+        gap: 6px;
+      }
+
+      .hud-pill-btn {
+        background: rgba(15, 23, 42, 0.85);
+        backdrop-filter: blur(8px);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        color: #f8fafc;
+        height: 32px;
+        padding: 0 10px;
+        border-radius: 8px;
+        font-size: 11px;
+        font-weight: 800;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+        transition: transform 0.1s ease, background 0.15s ease;
+      }
+
+      .hud-pill-btn:active {
+        transform: scale(0.94);
+      }
+
+      .vc-chip {
+        background: rgba(245, 158, 11, 0.18);
+        border: 1px solid rgba(245, 158, 11, 0.45);
+        color: #fbbf24;
+      }
+
+      .call-pick-btn {
+        background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+        border-color: #60a5fa;
+      }
+
+      /* 2K Player Target Foot Ring Tag with Stamina Meter */
+      .player-ring-tag {
+        position: absolute;
+        background: rgba(0, 0, 0, 0.88);
+        border: 1px solid rgba(255, 255, 255, 0.22);
+        color: #ffffff;
+        padding: 3px 8px;
+        border-radius: 8px;
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.04em;
+        transform: translate(-50%, -100%);
+        pointer-events: none;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 2px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.7);
+        z-index: 15;
+      }
+
+      .player-tag-row {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+
+      .stamina-track {
+        width: 60px;
+        height: 4px;
+        background: rgba(255, 255, 255, 0.2);
+        border-radius: 9999px;
+        overflow: hidden;
+      }
+
+      .stamina-fill {
+        height: 100%;
+        width: 100%;
+        background: linear-gradient(90deg, #eab308 0%, #22c55e 100%);
+        transition: width 0.1s linear, background 0.2s ease;
+      }
+
+      .stamina-low .stamina-fill {
+        background: #ef4444 !important;
+      }
+
+      /* On-Screen Teammate Tap Target Badges */
+      .teammate-pass-target {
+        position: absolute;
+        width: 32px;
+        height: 32px;
+        border-radius: 50%;
+        background: rgba(37, 99, 235, 0.85);
+        border: 2px solid #ffffff;
+        color: #ffffff;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 10px;
+        font-weight: 900;
+        box-shadow: 0 4px 10px rgba(0, 0, 0, 0.6);
+        transform: translate(-50%, -140%);
+        pointer-events: auto;
+        cursor: pointer;
+        z-index: 16;
+        animation: bounceTarget 1.2s infinite alternate;
+      }
+
+      @keyframes bounceTarget {
+        from { transform: translate(-50%, -140%) scale(0.95); }
+        to { transform: translate(-50%, -155%) scale(1.1); }
+      }
+
+      /* EXACT REPLICA OF THE 2K BROADCAST SCOREBUG (MATCHING SCREENSHOT) */
+      .broadcast-scorebug-container {
+        position: absolute;
+        bottom: max(16px, env(safe-area-inset-bottom));
+        right: max(16px, env(safe-area-inset-right));
+        z-index: 20;
+        pointer-events: auto;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.7);
+      }
+
+      .nba-scorebug-card {
+        background: #090d16;
+        border: 1.5px solid rgba(255, 255, 255, 0.22);
+        border-radius: 8px;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        width: 172px;
+      }
+
+      .scorebug-row {
+        display: flex;
+        align-items: center;
+        height: 28px;
+        padding: 0 8px;
+        gap: 8px;
+      }
+
+      .scorebug-row.away-team {
+        background: linear-gradient(90deg, #1d428a 0%, #153166 100%);
+        border-bottom: 1px solid rgba(0, 0, 0, 0.5);
+      }
+
+      .scorebug-row.home-team {
+        background: linear-gradient(90deg, #ce1141 0%, #8a0c2c 100%);
+        border-bottom: 1px solid rgba(0, 0, 0, 0.5);
+      }
+
+      .team-icon-decal {
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 9px;
+        font-weight: 900;
+        color: #ffffff;
+        background: rgba(255, 255, 255, 0.2);
+        flex-shrink: 0;
+      }
+
+      .team-code {
+        font-size: 13px;
+        font-weight: 900;
+        letter-spacing: 0.05em;
+        color: #ffffff;
+      }
+
+      .team-possession-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #fbbf24;
+        display: none;
+      }
+
+      .possession-active .team-possession-dot {
+        display: block;
+      }
+
+      .team-score-num {
+        font-size: 19px;
+        font-weight: 900;
+        color: #ffffff;
+        margin-left: auto;
+        font-variant-numeric: tabular-nums;
+        line-height: 1;
+      }
+
+      .scorebug-footer {
+        background: #090c14;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 3px 8px;
+        font-size: 11px;
+        font-weight: 800;
+      }
+
+      .quarter-txt {
+        color: #94a3b8;
+        letter-spacing: 0.04em;
+      }
+
+      .game-time-txt {
+        color: #f8fafc;
+        font-variant-numeric: tabular-nums;
+        font-weight: 900;
+      }
+
+      .shot-clock-tag {
+        color: #fbbf24;
+        font-weight: 900;
+        font-size: 12px;
+        font-variant-numeric: tabular-nums;
+        background: rgba(251, 191, 36, 0.12);
+        padding: 0 5px;
+        border-radius: 3px;
+        border: 1px solid rgba(251, 191, 36, 0.3);
+      }
+
+      .shot-clock-tag.danger {
+        color: #ef4444;
+        background: rgba(239, 68, 68, 0.2);
+        border-color: #ef4444;
+        animation: pulseDanger 0.5s infinite alternate;
+      }
+
+      @keyframes pulseDanger {
+        from { opacity: 0.6; }
+        to { opacity: 1; }
+      }
+
+      /* 2K VERTICAL SHOT METER (ABOVE SHOOTER'S HEAD) */
+      #vertical-shot-meter {
+        position: absolute;
+        transform: translate(-50%, -100%);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.12s ease;
+        z-index: 35;
+      }
+
+      #vertical-shot-meter.visible {
+        opacity: 1;
+      }
+
+      .v-meter-track {
+        width: 18px;
+        height: 80px;
+        background: rgba(15, 23, 42, 0.92);
+        border: 2px solid rgba(255, 255, 255, 0.45);
+        border-radius: 9999px;
+        position: relative;
+        overflow: hidden;
+        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.8), inset 0 2px 4px rgba(0, 0, 0, 0.6);
+      }
+
+      .v-meter-green-zone {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 74%;
+        height: 14%;
+        background: #22c55e;
+        box-shadow: inset 0 0 6px #86efac, 0 0 8px #22c55e;
+        z-index: 1;
+      }
+
+      .v-meter-fill {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        height: 0%;
+        background: #f59e0b;
+        border-radius: 0 0 9999px 9999px;
+        transition: height 0.02s linear, background 0.1s ease;
+        z-index: 2;
+      }
+
+      .v-meter-fill.green-hit {
+        background: #22c55e !important;
+        box-shadow: 0 0 12px #22c55e;
+      }
+
+      .v-meter-needle {
+        position: absolute;
+        left: -2px;
+        right: -2px;
+        bottom: 0%;
+        height: 3px;
+        background: #ffffff;
+        box-shadow: 0 0 6px #ffffff;
+        z-index: 3;
+      }
+
+      /* FLOATING SCORE POPUP NEAR HOOP (+2 / +3) */
+      #floating-score-popup {
+        position: absolute;
+        transform: translate(-50%, -50%);
+        font-size: 34px;
+        font-weight: 900;
+        letter-spacing: -0.02em;
+        opacity: 0;
+        pointer-events: none;
+        z-index: 40;
+        filter: drop-shadow(0 4px 12px rgba(0, 0, 0, 0.9));
+        text-shadow: 0 0 16px rgba(251, 191, 36, 0.8);
+      }
+
+      #floating-score-popup.show-points {
+        animation: floatScore 1.4s ease-out forwards;
+      }
+
+      @keyframes floatScore {
+        0% {
+          opacity: 0;
+          transform: translate(-50%, 0) scale(0.6);
+        }
+        20% {
+          opacity: 1;
+          transform: translate(-50%, -24px) scale(1.25);
+        }
+        70% {
+          opacity: 1;
+          transform: translate(-50%, -50px) scale(1.0);
+        }
+        100% {
+          opacity: 0;
+          transform: translate(-50%, -75px) scale(0.9);
+        }
+      }
+
+      /* 2K SHOT FEEDBACK HUD (EXCELLENT RELEASE / CONTEST %) */
+      #shot-feedback-hud {
+        position: absolute;
+        top: 18%;
+        left: 50%;
+        transform: translate(-50%, -50%) scale(0.85);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 4px;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.2s ease, transform 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        z-index: 30;
+      }
+
+      #shot-feedback-hud.show {
+        opacity: 1;
+        transform: translate(-50%, -50%) scale(1);
+      }
+
+      .feedback-box {
+        padding: 8px 24px;
+        border-radius: 9999px;
+        font-size: 19px;
+        font-weight: 900;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.8);
+      }
+
+      .feedback-green {
+        background: linear-gradient(135deg, #15803d 0%, #22c55e 100%);
+        color: #ffffff;
+        border: 2px solid #86efac;
+        box-shadow: 0 0 30px rgba(34, 197, 94, 0.9);
+      }
+
+      .feedback-yellow {
+        background: linear-gradient(135deg, #854d0e 0%, #eab308 100%);
+        color: #ffffff;
+        border: 2px solid #fef08a;
+      }
+
+      .feedback-red {
+        background: linear-gradient(135deg, #991b1b 0%, #ef4444 100%);
+        color: #ffffff;
+        border: 2px solid #fca5a5;
+      }
+
+      .feedback-detail {
+        font-size: 11px;
+        font-weight: 800;
+        color: #f1f5f9;
+        background: rgba(15, 23, 42, 0.85);
+        padding: 3px 12px;
+        border-radius: 9999px;
+      }
+
+      /* FOUL / TURNOVER BANNER */
+      #referee-banner {
+        position: absolute;
+        top: 26%;
+        left: 50%;
+        transform: translate(-50%, -50%) scale(0.9);
+        background: rgba(220, 38, 38, 0.92);
+        border: 2px solid #ffffff;
+        padding: 8px 24px;
+        border-radius: 12px;
+        font-size: 16px;
+        font-weight: 900;
+        color: #ffffff;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.2s ease, transform 0.2s ease;
+        z-index: 35;
+      }
+
+      #referee-banner.show {
+        opacity: 1;
+        transform: translate(-50%, -50%) scale(1);
+      }
+
+      /* 2K MOBILE ON-SCREEN CONTROLS: VIRTUAL D-PAD & CONTEXT-SENSITIVE BUTTONS */
+      .touch-controls-container {
+        position: absolute;
+        bottom: max(16px, env(safe-area-inset-bottom));
+        left: max(16px, env(safe-area-inset-left));
+        display: flex;
+        align-items: flex-end;
+        gap: 16px;
+        pointer-events: auto;
+        z-index: 20;
+      }
+
+      .joystick-base {
+        width: 100px;
+        height: 100px;
+        background: rgba(15, 23, 42, 0.65);
+        backdrop-filter: blur(8px);
+        border: 2px solid rgba(255, 255, 255, 0.25);
+        border-radius: 50%;
+        position: relative;
+        touch-action: none;
+      }
+
+      .joystick-thumb {
+        width: 44px;
+        height: 44px;
+        background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+        border: 2px solid #ffffff;
+        border-radius: 50%;
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        box-shadow: 0 4px 12px rgba(245, 158, 11, 0.5);
+        pointer-events: none;
+      }
+
+      .action-buttons-group {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        margin-left: 12px;
+      }
+
+      /* Context-Sensitive Action Buttons */
+      .context-btn {
+        width: 62px;
+        height: 62px;
+        border-radius: 50%;
+        border: 2px solid rgba(255, 255, 255, 0.28);
+        color: #ffffff;
+        font-size: 10px;
+        font-weight: 900;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 2px;
+        cursor: pointer;
+        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+        transition: transform 0.1s ease, background 0.15s ease, border-color 0.15s ease;
+      }
+
+      .context-btn:active {
+        transform: scale(0.9);
+      }
+
+      /* Context states: Shoot (3PT vs Midrange vs Dunk/Layup) */
+      .btn-shoot-3pt {
+        background: linear-gradient(135deg, #ef4444 0%, #b91c1c 100%);
+        border-color: #fca5a5;
+      }
+
+      .btn-shoot-mid {
+        background: linear-gradient(135deg, #f97316 0%, #c2410c 100%);
+        border-color: #fed7aa;
+      }
+
+      .btn-shoot-dunk {
+        background: linear-gradient(135deg, #eab308 0%, #ca8a04 100%);
+        border-color: #fef08a;
+      }
+
+      .btn-action-pass {
+        background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+        border-color: #93c5fd;
+      }
+
+      .btn-action-turbo {
+        width: 50px;
+        height: 50px;
+        font-size: 9px;
+        background: linear-gradient(135deg, #475569 0%, #334155 100%);
+        border-color: #94a3b8;
+      }
+
+      .btn-action-turbo.sprinting {
+        background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+        border-color: #fef08a;
+      }
+
+      /* 2K WAGER MODAL (MATCHUP SELECTION) */
+      .modal-overlay {
+        position: absolute;
+        inset: 0;
+        z-index: 50;
+        background: rgba(5, 8, 17, 0.88);
+        backdrop-filter: blur(12px);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 16px;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.25s ease;
+      }
+
+      .modal-overlay.open {
+        opacity: 1;
+        pointer-events: auto;
+      }
+
+      .modal-card {
+        background: #0d1222;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        border-radius: 20px;
+        width: 100%;
+        max-width: 460px;
+        padding: 22px;
+        box-shadow: 0 24px 60px rgba(0, 0, 0, 0.85);
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        transform: translateY(16px);
+        transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+        max-height: 90vh;
+        overflow-y: auto;
+      }
+
+      .modal-overlay.open .modal-card {
+        transform: translateY(0);
+      }
+
+      .modal-head {
+        text-align: center;
+      }
+
+      .modal-head h2 {
+        font-size: 22px;
+        font-weight: 900;
+        letter-spacing: -0.01em;
+        text-transform: uppercase;
+      }
+
+      .modal-head p {
+        font-size: 12px;
+        color: #94a3b8;
+        margin-top: 4px;
+      }
+
+      .wager-chips {
+        display: flex;
+        gap: 8px;
+      }
+
+      .wager-chip {
+        flex: 1;
+        background: rgba(30, 41, 59, 0.6);
+        border: 2px solid rgba(255, 255, 255, 0.1);
+        border-radius: 12px;
+        padding: 8px 4px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+
+      .wager-chip.selected {
+        border-color: #fbbf24;
+        background: rgba(251, 191, 36, 0.2);
+        transform: translateY(-2px);
+      }
+
+      .wager-num {
+        font-size: 14px;
+        font-weight: 900;
+        color: #fbbf24;
+      }
+
+      .wager-tag {
+        font-size: 9px;
+        font-weight: 800;
+        color: #94a3b8;
+        text-transform: uppercase;
+      }
+
+      .payout-box {
+        background: rgba(251, 191, 36, 0.1);
+        border: 1px dashed rgba(251, 191, 36, 0.4);
+        border-radius: 12px;
+        padding: 10px 14px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 13px;
+        font-weight: 800;
+      }
+
+      .payout-val {
+        color: #fbbf24;
+        font-size: 16px;
+        font-weight: 900;
+      }
+
+      .submit-play-btn {
+        background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+        border: none;
+        color: #000000;
+        font-size: 16px;
+        font-weight: 900;
+        padding: 14px;
+        border-radius: 12px;
+        cursor: pointer;
+        box-shadow: 0 8px 24px rgba(245, 158, 11, 0.4);
+        text-align: center;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+      }
+
+      .submit-play-btn:active {
+        transform: scale(0.97);
+      }
+
+      /* Confetti Canvas */
+      #confetti-canvas {
+        position: absolute;
+        inset: 0;
+        z-index: 60;
+        pointer-events: none;
+        width: 100%;
+        height: 100%;
+      }
+
+      /* 2K ARENA LOADING SCREEN WITH PROGRESS BAR */
+      #loading-screen {
+        position: absolute;
+        inset: 0;
+        z-index: 100;
+        background: radial-gradient(circle at center, #111827 0%, #050811 100%);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        transition: opacity 0.5s cubic-bezier(0.16, 1, 0.3, 1), visibility 0.5s ease;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+
+      #loading-screen.loaded {
+        opacity: 0 !important;
+        visibility: hidden !important;
+        pointer-events: none !important;
+        display: none !important;
+      }
+
+      .loading-card {
+        width: 100%;
+        max-width: 440px;
+        background: rgba(15, 23, 42, 0.92);
+        backdrop-filter: blur(16px);
+        -webkit-backdrop-filter: blur(16px);
+        border: 1.5px solid rgba(255, 255, 255, 0.18);
+        border-radius: 24px;
+        padding: 28px 24px;
+        box-shadow: 0 25px 60px rgba(0, 0, 0, 0.85);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 18px;
+        text-align: center;
+      }
+
+      .loading-logo-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .loading-2k-badge {
+        background: #ef4444;
+        color: #ffffff;
+        font-weight: 900;
+        font-size: 15px;
+        padding: 3px 8px;
+        border-radius: 6px;
+        letter-spacing: -0.05em;
+        box-shadow: 0 4px 12px rgba(239, 68, 68, 0.4);
+      }
+
+      .loading-game-title {
+        font-size: 24px;
+        font-weight: 900;
+        letter-spacing: -0.01em;
+        text-transform: uppercase;
+        color: #ffffff;
+      }
+
+      .loading-game-sub {
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.12em;
+        color: #94a3b8;
+        text-transform: uppercase;
+        margin-top: -12px;
+      }
+
+      /* Matchup Team Showcase */
+      .loading-matchup {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        width: 100%;
+        background: rgba(30, 41, 59, 0.5);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 16px;
+        padding: 12px 16px;
+      }
+
+      .loading-team {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 4px;
+        flex: 1;
+      }
+
+      .loading-team-icon {
+        width: 44px;
+        height: 44px;
+        border-radius: 12px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 16px;
+        font-weight: 900;
+        color: #ffffff;
+        box-shadow: 0 6px 14px rgba(0, 0, 0, 0.5);
+      }
+
+      .loading-team.warriors .loading-team-icon {
+        background: linear-gradient(135deg, #1d428a 0%, #153166 100%);
+        border: 2px solid #ffc72c;
+      }
+
+      .loading-team.rockets .loading-team-icon {
+        background: linear-gradient(135deg, #ce1141 0%, #8a0c2c 100%);
+        border: 2px solid #ffffff;
+      }
+
+      .loading-team-name {
+        font-size: 13px;
+        font-weight: 900;
+        letter-spacing: 0.04em;
+      }
+
+      .loading-star-name {
+        font-size: 10px;
+        color: #fbbf24;
+        font-weight: 800;
+      }
+
+      .loading-vs-badge {
+        font-size: 14px;
+        font-weight: 900;
+        color: #ef4444;
+        background: rgba(239, 68, 68, 0.15);
+        padding: 4px 10px;
+        border-radius: 8px;
+        border: 1px solid rgba(239, 68, 68, 0.3);
+      }
+
+      /* Loading Progress Bar Component */
+      .loading-progress-box {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        width: 100%;
+      }
+
+      .loading-status-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.04em;
+      }
+
+      #loading-status-text {
+        color: #cbd5e1;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      #loading-percentage {
+        color: #f59e0b;
+        font-size: 13px;
+        font-weight: 900;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .loading-bar-track {
+        width: 100%;
+        height: 12px;
+        background: rgba(255, 255, 255, 0.12);
+        border: 1.5px solid rgba(255, 255, 255, 0.2);
+        border-radius: 9999px;
+        overflow: hidden;
+        position: relative;
+        box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.4);
+      }
+
+      .loading-bar-fill {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, #f59e0b 0%, #22c55e 100%);
+        border-radius: 9999px;
+        transition: width 0.25s ease-out;
+        box-shadow: 0 0 12px rgba(34, 197, 94, 0.6);
+      }
+
+      /* Tip-Off Ready Button */
+      .loading-tipoff-btn {
+        width: 100%;
+        background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+        border: none;
+        color: #000000;
+        font-size: 16px;
+        font-weight: 900;
+        padding: 14px;
+        border-radius: 14px;
+        cursor: pointer;
+        box-shadow: 0 8px 24px rgba(245, 158, 11, 0.45);
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        display: block;
+        touch-action: manipulation;
+        pointer-events: auto;
+        animation: pulseBtn 1s infinite alternate;
+        transition: transform 0.12s ease;
+      }
+
+      .loading-tipoff-btn:active {
+        transform: scale(0.97);
+      }
+
+      @keyframes pulseBtn {
+        from { transform: scale(0.98); box-shadow: 0 8px 20px rgba(245, 158, 11, 0.3); }
+        to { transform: scale(1.02); box-shadow: 0 12px 28px rgba(245, 158, 11, 0.7); }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="canvas-container"></div>
+    <canvas id="confetti-canvas"></canvas>
+
+    <!-- 2D 2K HUD UI Overlay Layer -->
+    <div id="hud-layer">
+      <!-- Top Navigation -->
+      <div class="top-nav">
+        <div class="branding-box">
+          <span class="logo-2k-pill">2K</span>
+          <span class="brand-title">NBA 2K26 ARENA</span>
+        </div>
+
+        <div class="top-actions">
+          <div class="hud-pill-btn vc-chip">
+            <span>🪙 VC:</span>
+            <span id="vc-balance-text">2,500</span>
+          </div>
+          <button class="hud-pill-btn call-pick-btn" id="call-pick-btn" title="Call Pick & Roll Screen">
+            🛡️ Call Screen
+          </button>
+          <button class="hud-pill-btn" id="cam-toggle-btn">
+            🎥 Broadcast Cam
+          </button>
+          <button class="hud-pill-btn" id="sound-btn">
+            🔊
+          </button>
+          <button class="hud-pill-btn" id="wager-btn" style="background:#f59e0b; color:#000;">
+            ⚡ Bet Wager
+          </button>
+        </div>
+      </div>
+
+      <!-- Player Target Foot Tag with Stamina Bar -->
+      <div class="player-ring-tag" id="player-hud-tag">
+        <div class="player-tag-row">
+          <span class="player-takeover-flame">🔥</span>
+          <span id="player-tag-name">S. CURRY #30</span>
+        </div>
+        <div class="stamina-track" id="stamina-track">
+          <div class="stamina-fill" id="stamina-fill"></div>
+        </div>
+      </div>
+
+      <!-- 2K Vertical Shot Timing Meter (Attached directly above player head) -->
+      <div id="vertical-shot-meter">
+        <div class="v-meter-track">
+          <div class="v-meter-green-zone" id="v-meter-green-zone"></div>
+          <div class="v-meter-fill" id="v-meter-fill"></div>
+          <div class="v-meter-needle" id="v-meter-needle"></div>
+        </div>
+      </div>
+
+      <!-- Floating Score Popup Near Hoop (+2 or +3) -->
+      <div id="floating-score-popup">+2</div>
+
+      <!-- 2K Shot Feedback HUD (GREEN RELEASE / CONTEST %) -->
+      <div id="shot-feedback-hud">
+        <div class="feedback-box feedback-green" id="feedback-grade">GREEN RELEASE!</div>
+        <div class="feedback-detail" id="feedback-detail">Excellent Timing | Wide Open</div>
+      </div>
+
+      <!-- Referee Whistle / Foul / Turnover Banner -->
+      <div id="referee-banner">SHOT CLOCK VIOLATION!</div>
+
+      <!-- Virtual Controls on Bottom-Left: Joystick & Context-Sensitive Buttons -->
+      <div class="touch-controls-container">
+        <!-- Virtual Joystick -->
+        <div class="joystick-base" id="joystick-base">
+          <div class="joystick-thumb" id="joystick-thumb"></div>
+        </div>
+
+        <!-- Context-Sensitive Action Buttons -->
+        <div class="action-buttons-group">
+          <!-- Contextual Shoot Button (Changes between 3PT, PULL-UP, LAYUP/DUNK) -->
+          <button class="context-btn btn-shoot-3pt" id="btn-shoot">
+            <span id="shoot-btn-icon">🎯</span>
+            <span id="shoot-btn-label">SHOOT 3PT</span>
+          </button>
+
+          <!-- Contextual Pass Button (Pass / Alley-Oop) -->
+          <button class="context-btn btn-action-pass" id="btn-pass">
+            <span>🏀</span>
+            <span id="pass-btn-label">PASS</span>
+          </button>
+
+          <!-- Sprint / Turbo Button (Consumes Stamina) -->
+          <button class="context-btn btn-action-turbo" id="btn-turbo">
+            <span>⚡</span>
+            <span>TURBO</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- EXACT REPLICA OF THE 2K BROADCAST SCOREBUG -->
+      <div class="broadcast-scorebug-container">
+        <div class="nba-scorebug-card">
+          <!-- Away Team Row: Warriors (GS) -->
+          <div class="scorebug-row away-team possession-active" id="away-score-row">
+            <div class="team-icon-decal">GS</div>
+            <span class="team-code">GS</span>
+            <div class="team-possession-dot"></div>
+            <span class="team-score-num" id="away-pts">10</span>
+          </div>
+
+          <!-- Home Team Row: Rockets (HOU) -->
+          <div class="scorebug-row home-team" id="home-score-row">
+            <div class="team-icon-decal" style="background:#ce1141">R</div>
+            <span class="team-code">HOU</span>
+            <div class="team-possession-dot"></div>
+            <span class="team-score-num" id="home-pts">8</span>
+          </div>
+
+          <!-- Bottom Clock Strip: 2nd 1:40 | Shot Clock: 15 -->
+          <div class="scorebug-footer">
+            <span class="quarter-txt" id="quarter-label">2nd</span>
+            <span class="game-time-txt" id="game-time-label">1:40</span>
+            <span class="shot-clock-tag" id="shot-clock-label">15</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2K LOADING SCREEN WITH PROGRESS BAR -->
+    <div id="loading-screen">
+      <div class="loading-card">
+        <div class="loading-logo-row">
+          <div class="loading-2k-badge">2K</div>
+          <div class="loading-game-title">NBA 2K26</div>
+        </div>
+        <div class="loading-game-sub">ARENA BROADCAST SHOWDOWN</div>
+
+        <!-- Matchup Showcase -->
+        <div class="loading-matchup">
+          <div class="loading-team warriors">
+            <div class="loading-team-icon">GS</div>
+            <div class="loading-team-name">WARRIORS</div>
+            <div class="loading-star-name">S. CURRY #30</div>
+          </div>
+          <div class="loading-vs-badge">VS</div>
+          <div class="loading-team rockets">
+            <div class="loading-team-icon">HOU</div>
+            <div class="loading-team-name">ROCKETS</div>
+            <div class="loading-star-name">J. HARDEN #13</div>
+          </div>
+        </div>
+
+        <!-- Progress Bar & Status -->
+        <div class="loading-progress-box">
+          <div class="loading-status-row">
+            <span id="loading-status-text">Loading Toyota Center Arena...</span>
+            <span id="loading-percentage">0%</span>
+          </div>
+          <div class="loading-bar-track">
+            <div class="loading-bar-fill" id="loading-bar-fill"></div>
+          </div>
+        </div>
+
+        <!-- Tip-off button (appears when loaded) -->
+        <button class="loading-tipoff-btn" id="loading-start-btn">
+          TIP OFF MATCH 🏀
+        </button>
+      </div>
+    </div>
+
+    <!-- 2K WAGER MODAL (Opened via Bet Wager button) -->
+    <div class="modal-overlay" id="wager-modal">
+      <div class="modal-card">
+        <div class="modal-head">
+          <h2>🏀 NBA 2K26 CLUTCH WAGER</h2>
+          <p>Golden State Warriors vs Houston Rockets — Place your VC & Tip Off!</p>
+        </div>
+
+        <div class="wager-chips" id="wager-chips">
+          <div class="wager-chip" data-val="100">
+            <span class="wager-num">100</span>
+            <span class="wager-tag">Rookie</span>
+          </div>
+          <div class="wager-chip selected" data-val="250">
+            <span class="wager-num">250</span>
+            <span class="wager-tag">Pro</span>
+          </div>
+          <div class="wager-chip" data-val="500">
+            <span class="wager-num">500</span>
+            <span class="wager-tag">All-Star</span>
+          </div>
+          <div class="wager-chip" data-val="1000">
+            <span class="wager-num">1,000</span>
+            <span class="wager-tag">HOF</span>
+          </div>
+        </div>
+
+        <div class="payout-box">
+          <span>Winner Takes All (2x VC):</span>
+          <span class="payout-val" id="payout-preview">500 VC 🪙</span>
+        </div>
+
+        <button class="submit-play-btn" id="start-match-btn">
+          TIP-OFF MATCH 🔥
+        </button>
+      </div>
+    </div>
+
+    <!-- Game Script using Three.js & Cannon-es -->
+    <script type="module">
+      import * as THREE from 'three';
+      import * as CANNON from 'cannon-es';
+
+      // ==========================================
+      // 1. MATCH STATE & ROSTERS
+      // ==========================================
+      let vcBalance = parseInt(localStorage.getItem('nba2k_vc') || '2500', 10);
+      let currentWager = 250;
+      let homeScore = 8; // Rockets
+      let awayScore = 10; // Warriors
+      let shotClock = 15;
+      let gameSeconds = 100; // 1:40
+      let activePossession = 'away'; // 'away' (GS Warriors user controls) vs 'home' (Rockets CPU)
+
+      // Player Stamina System
+      let stamina = 100; // 0 to 100
+      let isSprinting = false;
+
+      // Adaptive AI Difficulty Factor (Scales up as user plays well)
+      let consecutiveMakes = 0;
+      let aiDefenseIntensity = 1.0; // 1.0 to 1.8
+
+      // Audio & Cam Flags
+      let soundEnabled = true;
+      let currentCamIndex = 0; // 0: Broadcast, 1: 2K Cam, 2: High Angle
+
+      const CAMERAS = [
+        { name: 'Broadcast Cam', pos: new THREE.Vector3(7.8, 6.2, 5.5), target: new THREE.Vector3(-1.5, 1.8, -0.5) },
+        { name: '2K Cam', pos: new THREE.Vector3(0, 3.8, 8.8), target: new THREE.Vector3(-2.0, 2.5, -2.5) },
+        { name: 'Sideline Drive', pos: new THREE.Vector3(5.2, 3.2, 3.5), target: new THREE.Vector3(-3.5, 2.0, -1.5) }
+      ];
+
+      // DOM Elements
+      const vcBalanceText = document.getElementById('vc-balance-text');
+      const homePts = document.getElementById('home-pts');
+      const awayPts = document.getElementById('away-pts');
+      const shotClockLabel = document.getElementById('shot-clock-label');
+      const gameTimeLabel = document.getElementById('game-time-label');
+      const awayScoreRow = document.getElementById('away-score-row');
+      const homeScoreRow = document.getElementById('home-score-row');
+      const playerHudTag = document.getElementById('player-hud-tag');
+      const playerTagName = document.getElementById('player-tag-name');
+      // Strictly guarantee only ONE nameplate element exists in the DOM
+      document.querySelectorAll('.player-ring-tag').forEach((el, idx) => {
+        if (idx > 0) el.remove();
+      });
+      const staminaFill = document.getElementById('stamina-fill');
+      const staminaTrack = document.getElementById('stamina-track');
+      const verticalShotMeter = document.getElementById('vertical-shot-meter');
+      const vMeterGreenZone = document.getElementById('v-meter-green-zone');
+      const vMeterFill = document.getElementById('v-meter-fill');
+      const vMeterNeedle = document.getElementById('v-meter-needle');
+      const floatingScorePopup = document.getElementById('floating-score-popup');
+      const shotFeedbackHud = document.getElementById('shot-feedback-hud');
+      const feedbackGrade = document.getElementById('feedback-grade');
+      const feedbackDetail = document.getElementById('feedback-detail');
+      const refereeBanner = document.getElementById('referee-banner');
+      const camToggleBtn = document.getElementById('cam-toggle-btn');
+      const soundBtn = document.getElementById('sound-btn');
+      const wagerBtn = document.getElementById('wager-btn');
+      const callPickBtn = document.getElementById('call-pick-btn');
+      const wagerModal = document.getElementById('wager-modal');
+      const startMatchBtn = document.getElementById('start-match-btn');
+      const payoutPreview = document.getElementById('payout-preview');
+      const confettiCanvas = document.getElementById('confetti-canvas');
+
+      function showFloatingScore(points, pos) {
+        if (!floatingScorePopup) return;
+        const x = pos && typeof pos.x === 'number' ? pos.x : HOOP_X;
+        const y = (pos && typeof pos.y === 'number' ? pos.y : HOOP_Y + 0.6) + 0.5;
+        const z = pos && typeof pos.z === 'number' ? pos.z : HOOP_Z;
+        const pScr = new THREE.Vector3(x, y, z);
+        pScr.project(camera);
+        const sx = (pScr.x * 0.5 + 0.5) * window.innerWidth;
+        const sy = (-(pScr.y * 0.5) + 0.5) * window.innerHeight;
+
+        floatingScorePopup.style.left = `${sx}px`;
+        floatingScorePopup.style.top = `${sy}px`;
+        floatingScorePopup.textContent = points === 3 ? '+3 🎯' : '+2';
+        floatingScorePopup.style.color = points === 3 ? '#22c55e' : '#fbbf24';
+
+        floatingScorePopup.classList.remove('show-points');
+        void floatingScorePopup.offsetWidth; // Force CSS reflow
+        floatingScorePopup.classList.add('show-points');
+      }
+
+      // Context button elements
+      const btnShoot = document.getElementById('btn-shoot');
+      const shootBtnIcon = document.getElementById('shoot-btn-icon');
+      const shootBtnLabel = document.getElementById('shoot-btn-label');
+      const btnPass = document.getElementById('btn-pass');
+      const passBtnLabel = document.getElementById('pass-btn-label');
+      const btnTurbo = document.getElementById('btn-turbo');
+
+      function updateVcDisplay() {
+        vcBalanceText.textContent = vcBalance.toLocaleString();
+        localStorage.setItem('nba2k_vc', vcBalance.toString());
+      }
+      updateVcDisplay();
+
+      // ==========================================
+      // 2. 2K AUDIO SYNTHESIZER
+      // ==========================================
+      let audioCtx = null;
+      function initAudio() {
+        if (!audioCtx) {
+          const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+          if (AudioContextClass) audioCtx = new AudioContextClass();
+        }
+        if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+      }
+
+      function playSound(type, val = 1.0) {
+        if (!soundEnabled || !audioCtx) return;
+        try {
+          const now = audioCtx.currentTime;
+          if (type === 'green') {
+            [1046.5, 1318.51, 1567.98, 2093.0].forEach((f, i) => {
+              const osc = audioCtx.createOscillator();
+              const gain = audioCtx.createGain();
+              osc.type = 'sine';
+              osc.frequency.setValueAtTime(f, now + i * 0.03);
+              gain.gain.setValueAtTime(0.28, now + i * 0.03);
+              gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.03 + 0.65);
+              osc.connect(gain);
+              gain.connect(audioCtx.destination);
+              osc.start(now + i * 0.03);
+              osc.stop(now + i * 0.03 + 0.7);
+            });
+          } else if (type === 'swish') {
+            const size = audioCtx.sampleRate * 0.32;
+            const noise = audioCtx.createBuffer(1, size, audioCtx.sampleRate);
+            const data = noise.getChannelData(0);
+            for (let i = 0; i < size; i++) data[i] = Math.random() * 2 - 1;
+            const src = audioCtx.createBufferSource();
+            src.buffer = noise;
+            const filter = audioCtx.createBiquadFilter();
+            filter.type = 'bandpass';
+            filter.frequency.setValueAtTime(2300, now);
+            filter.Q.setValueAtTime(3.2, now);
+            const gain = audioCtx.createGain();
+            gain.gain.setValueAtTime(0.01, now);
+            gain.gain.linearRampToValueAtTime(0.38, now + 0.04);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+            src.connect(filter);
+            filter.connect(gain);
+            gain.connect(audioCtx.destination);
+            src.start(now);
+            src.stop(now + 0.32);
+          } else if (type === 'bounce') {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'triangle';
+            osc.frequency.setValueAtTime(130 + Math.random() * 20, now);
+            osc.frequency.exponentialRampToValueAtTime(35, now + 0.09);
+            gain.gain.setValueAtTime(Math.min(Math.max(val * 0.35, 0.05), 0.45), now);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start(now);
+            osc.stop(now + 0.11);
+          } else if (type === 'squeak') {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(800 + Math.random() * 400, now);
+            osc.frequency.linearRampToValueAtTime(1400, now + 0.08);
+            gain.gain.setValueAtTime(0.08, now);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start(now);
+            osc.stop(now + 0.1);
+          } else if (type === 'whistle') {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(2600, now);
+            gain.gain.setValueAtTime(0.3, now);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + 0.45);
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start(now);
+            osc.stop(now + 0.46);
+          }
+        } catch (e) {}
+      }
+
+      function showRefereeBanner(text) {
+        playSound('whistle');
+        refereeBanner.textContent = text;
+        refereeBanner.classList.add('show');
+        setTimeout(() => refereeBanner.classList.remove('show'), 2000);
+      }
+
+      // ==========================================
+      // 3. CANNON-ES PHYSICS & REALISTIC BALL FORCES
+      // ==========================================
+      const HOOP_X = -6.5; // Left baseline basket matching screenshot
+      const HOOP_Y = 3.05; // 10ft standard
+      const HOOP_Z = -0.5;
+      const RIM_RADIUS = 0.23;
+      const BALL_RADIUS = 0.12;
+
+      const world = new CANNON.World();
+      world.gravity.set(0, -9.82, 0);
+      world.broadphase = new CANNON.NaiveBroadphase();
+      world.solver.iterations = 10;
+
+      const ballMat = new CANNON.Material('ball');
+      const floorMat = new CANNON.Material('floor');
+      const rimMat = new CANNON.Material('rim');
+      const boardMat = new CANNON.Material('board');
+
+      world.addContactMaterial(new CANNON.ContactMaterial(ballMat, floorMat, { restitution: 0.76, friction: 0.4 }));
+      world.addContactMaterial(new CANNON.ContactMaterial(ballMat, rimMat, { restitution: 0.55, friction: 0.28 }));
+      world.addContactMaterial(new CANNON.ContactMaterial(ballMat, boardMat, { restitution: 0.72, friction: 0.2 }));
+
+      // Floor
+      const groundBody = new CANNON.Body({ mass: 0, material: floorMat, shape: new CANNON.Plane() });
+      groundBody.quaternion.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), -Math.PI / 2);
+      world.addBody(groundBody);
+
+      // Ball
+      const ballBody = new CANNON.Body({
+        mass: 0.62,
+        material: ballMat,
+        shape: new CANNON.Sphere(BALL_RADIUS),
+        linearDamping: 0.06,
+        angularDamping: 0.12
+      });
+      ballBody.position.set(0, 1.2, 0);
+      world.addBody(ballBody);
+
+      // Backboard
+      const backboardBody = new CANNON.Body({
+        mass: 0,
+        material: boardMat,
+        shape: new CANNON.Box(new CANNON.Vec3(0.04, 0.53, 0.9))
+      });
+      backboardBody.position.set(HOOP_X - 0.38, 3.42, HOOP_Z);
+      world.addBody(backboardBody);
+
+      // Rim
+      const rimBody = new CANNON.Body({ mass: 0, material: rimMat });
+      for (let i = 0; i < 16; i++) {
+        const a = (i / 16) * Math.PI * 2;
+        rimBody.addShape(
+          new CANNON.Sphere(0.018),
+          new CANNON.Vec3(RIM_RADIUS * Math.cos(a), 0, RIM_RADIUS * Math.sin(a))
+        );
+      }
+      rimBody.position.set(HOOP_X, HOOP_Y, HOOP_Z);
+      world.addBody(rimBody);
+
+      // Collision listener with zero-crash safe calculation
+      ballBody.addEventListener('collide', (e) => {
+        let v = ballBody.velocity ? ballBody.velocity.length() : 3.0;
+        if (e && e.contact && typeof e.contact.getImpactVelocityAlongNormal === 'function') {
+          try {
+            v = Math.abs(e.contact.getImpactVelocityAlongNormal());
+          } catch (err) {
+            v = ballBody.velocity.length();
+          }
+        }
+        if (e.body === groundBody) {
+          playSound('bounce', v / 5.0);
+        } else if (e.body === rimBody || e.body === backboardBody) {
+          playSound('bounce', 0.8);
+        }
+      });
+
+      // ==========================================
+      // 4. THREE.JS ARENA & BROADCAST SCENE
+      // ==========================================
+      const container = document.getElementById('canvas-container');
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x0a0e1a);
+      scene.fog = new THREE.FogExp2(0x0a0e1a, 0.018);
+
+      const camera = new THREE.PerspectiveCamera(46, window.innerWidth / window.innerHeight, 0.1, 100);
+      camera.position.copy(CAMERAS[0].pos);
+      camera.lookAt(CAMERAS[0].target);
+
+      const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.3;
+      container.appendChild(renderer.domElement);
+
+      // Arena Lighting
+      const ambientLight = new THREE.AmbientLight(0xffffff, 0.95);
+      scene.add(ambientLight);
+
+      const courtLight = new THREE.SpotLight(0xfff7ed, 3.4, 40, Math.PI / 3.2, 0.4, 1.2);
+      courtLight.position.set(4, 12, 6);
+      courtLight.target.position.set(-1, 0, 0);
+      courtLight.castShadow = true;
+      courtLight.shadow.mapSize.width = 1024;
+      courtLight.shadow.mapSize.height = 1024;
+      scene.add(courtLight);
+      scene.add(courtLight.target);
+
+      const rimRimLight = new THREE.DirectionalLight(0x93c5fd, 0.85);
+      rimRimLight.position.set(-8, 8, -4);
+      scene.add(rimRimLight);
+
+      // ==========================================
+      // 5. COURT PROCEDURAL TEXTURE (HOUSTON ROCKETS EXACT MATCH)
+      // ==========================================
+      function createRocketsCourtTexture() {
+        const canvas = document.createElement('canvas');
+        canvas.width = 2048;
+        canvas.height = 1024;
+        const ctx = canvas.getContext('2d');
+
+        ctx.fillStyle = '#c7844a';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        for (let y = 0; y < canvas.height; y += 14) {
+          const shade = ((Math.sin(y * 1.5) + 1) * 0.5) * 20;
+          ctx.fillStyle = `rgb(${195 + shade}, ${125 + shade * 0.8}, ${65 + shade * 0.6})`;
+          ctx.fillRect(0, y, canvas.width, 13);
+          ctx.fillStyle = 'rgba(0, 0, 0, 0.08)';
+          ctx.fillRect(0, y + 13, canvas.width, 1);
+        }
+
+        const baselineWidth = 180;
+        ctx.fillStyle = '#ce1141'; // Rockets Red
+        ctx.fillRect(0, 0, baselineWidth, canvas.height);
+
+        ctx.save();
+        ctx.translate(baselineWidth / 2, canvas.height / 2);
+        ctx.rotate(-Math.PI / 2);
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 96px Arial Black, Impact, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('HOUSTON ROCKETS', 0, 0);
+        ctx.restore();
+
+        ctx.fillStyle = '#ce1141';
+        ctx.fillRect(0, 0, canvas.width, 40);
+        ctx.fillRect(0, canvas.height - 40, canvas.width, 40);
+
+        const keyLeft = baselineWidth;
+        const keyTop = canvas.height * 0.33;
+        const keyWidth = 460;
+        const keyHeight = canvas.height * 0.34;
+
+        ctx.fillStyle = '#ce1141';
+        ctx.fillRect(keyLeft, keyTop, keyWidth, keyHeight);
+
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 10;
+        ctx.strokeRect(keyLeft, keyTop, keyWidth, keyHeight);
+
+        ctx.beginPath();
+        ctx.arc(keyLeft + keyWidth, canvas.height / 2, 140, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.fillStyle = 'rgba(206, 17, 65, 0.35)';
+        ctx.beginPath();
+        ctx.arc(keyLeft + keyWidth, canvas.height / 2, 140, -Math.PI / 2, Math.PI / 2);
+        ctx.fill();
+
+        ctx.lineWidth = 12;
+        ctx.beginPath();
+        ctx.moveTo(baselineWidth, 120);
+        ctx.lineTo(baselineWidth + 240, 120);
+        ctx.arc(keyLeft + 60, canvas.height / 2, 420, -0.38 * Math.PI, 0.38 * Math.PI);
+        ctx.lineTo(baselineWidth, canvas.height - 120);
+        ctx.stroke();
+
+        ctx.fillStyle = '#ce1141';
+        ctx.beginPath();
+        ctx.arc(1024, canvas.height / 2, 140, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#ffffff';
+        ctx.stroke();
+
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 96px Impact, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('R', 1024, canvas.height / 2);
+
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.wrapS = THREE.ClampToEdgeWrapping;
+        tex.wrapT = THREE.ClampToEdgeWrapping;
+        return tex;
+      }
+
+      // Court Floor
+      const courtTex = createRocketsCourtTexture();
+      const floorMesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(32, 16),
+        new THREE.MeshStandardMaterial({ map: courtTex, roughness: 0.22, metalness: 0.18 })
+      );
+      floorMesh.rotation.x = -Math.PI / 2;
+      floorMesh.receiveShadow = true;
+      scene.add(floorMesh);
+
+      // Stanchion
+      const stanchionGroup = new THREE.Group();
+      stanchionGroup.position.set(HOOP_X - 1.2, 0, HOOP_Z);
+
+      const stanchionBase = new THREE.Mesh(
+        new THREE.BoxGeometry(0.8, 1.4, 1.2),
+        new THREE.MeshStandardMaterial({ color: 0xce1141, roughness: 0.4 })
+      );
+      stanchionBase.position.set(0, 0.7, 0);
+      stanchionBase.castShadow = true;
+      stanchionGroup.add(stanchionBase);
+
+      const armMesh = new THREE.Mesh(
+        new THREE.BoxGeometry(1.6, 0.18, 0.18),
+        new THREE.MeshStandardMaterial({ color: 0xce1141, roughness: 0.3 })
+      );
+      armMesh.position.set(0.65, 2.7, 0);
+      armMesh.rotation.z = -0.55;
+      stanchionGroup.add(armMesh);
+
+      const boardMesh = new THREE.Mesh(
+        new THREE.BoxGeometry(0.04, 1.05, 1.8),
+        new THREE.MeshPhysicalMaterial({ color: 0xffffff, transparent: true, opacity: 0.78, roughness: 0.1, transmission: 0.85 })
+      );
+      boardMesh.position.set(0.82, 3.42, 0);
+      boardMesh.castShadow = true;
+      stanchionGroup.add(boardMesh);
+
+      const shotClockMesh = new THREE.Mesh(
+        new THREE.BoxGeometry(0.18, 0.3, 0.6),
+        new THREE.MeshStandardMaterial({ color: 0x090c14, roughness: 0.4 })
+      );
+      shotClockMesh.position.set(0.82, 4.15, 0);
+      stanchionGroup.add(shotClockMesh);
+
+      const rimVisualMat = new THREE.MeshStandardMaterial({ color: 0xe6391a, roughness: 0.25, metalness: 0.8 });
+      const rimMesh = new THREE.Mesh(new THREE.TorusGeometry(RIM_RADIUS, 0.018, 16, 32), rimVisualMat);
+      rimMesh.rotation.x = Math.PI / 2;
+      rimMesh.position.set(HOOP_X, HOOP_Y, HOOP_Z);
+      scene.add(rimMesh);
+
+      const netGeo = new THREE.CylinderGeometry(RIM_RADIUS * 0.98, RIM_RADIUS * 0.65, 0.45, 18, 8, true);
+      const netMesh = new THREE.Mesh(netGeo, new THREE.MeshStandardMaterial({ color: 0xf8fafc, wireframe: true, roughness: 0.8 }));
+      netMesh.position.set(HOOP_X, HOOP_Y - 0.22, HOOP_Z);
+      scene.add(netMesh);
+      scene.add(stanchionGroup);
+
+      // Bench & Coolers
+      const benchGroup = new THREE.Group();
+      benchGroup.position.set(-1.0, 0, -8.2);
+      const benchWood = new THREE.Mesh(
+        new THREE.BoxGeometry(10, 0.5, 0.6),
+        new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.5 })
+      );
+      benchWood.position.set(0, 0.25, 0);
+      benchGroup.add(benchWood);
+
+      const cooler = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.3, 0.3, 0.7, 16),
+        new THREE.MeshStandardMaterial({ color: 0xf97316, roughness: 0.3 })
+      );
+      cooler.position.set(5.5, 0.5, 0);
+      benchGroup.add(cooler);
+      scene.add(benchGroup);
+
+      // Crowd
+      const crowdGroup = new THREE.Group();
+      for (let row = 0; row < 4; row++) {
+        for (let col = -12; col <= 12; col += 1.2) {
+          const fanMat = new THREE.MeshStandardMaterial({
+            color: Math.random() > 0.4 ? 0xce1141 : (Math.random() > 0.5 ? 0x1d428a : 0xf1f5f9),
+            roughness: 0.7
+          });
+          const fan = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.22, 0.7, 8), fanMat);
+          fan.position.set(col, 0.4 + row * 0.45, 8.8 + row * 1.1);
+          crowdGroup.add(fan);
+        }
+      }
+      scene.add(crowdGroup);
+
+      // Mascot
+      const mascot = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.3, 0.35, 1.2, 10),
+        new THREE.MeshStandardMaterial({ color: 0x475569, roughness: 0.9 })
+      );
+      mascot.position.set(HOOP_X - 1.2, 0.6, 3.2);
+      scene.add(mascot);
+
+      // Ball Visual Mesh
+      const ballMesh = new THREE.Mesh(
+        new THREE.SphereGeometry(BALL_RADIUS, 24, 24),
+        new THREE.MeshStandardMaterial({ color: 0xd9571e, roughness: 0.55, metalness: 0.05 })
+      );
+      ballMesh.castShadow = true;
+      scene.add(ballMesh);
+
+      // ==========================================
+      // 6. 3D NBA PLAYERS & ANIMATED SKELETONS
+      // ==========================================
+      function createPlayerMesh(isWarriors, name, number, rating3PT = 85) {
+        const group = new THREE.Group();
+
+        const jerseyColor = isWarriors ? 0x1d428a : 0xf1f5f9; // Away blue vs Home white
+        const trimColor = isWarriors ? 0xffc72c : 0xce1141;
+
+        const torso = new THREE.Mesh(
+          new THREE.BoxGeometry(0.48, 0.65, 0.26),
+          new THREE.MeshStandardMaterial({ color: jerseyColor, roughness: 0.6 })
+        );
+        torso.position.y = 1.35;
+        torso.castShadow = true;
+        group.add(torso);
+
+        const head = new THREE.Mesh(
+          new THREE.SphereGeometry(0.16, 16, 16),
+          new THREE.MeshStandardMaterial({ color: 0xa87148, roughness: 0.8 })
+        );
+        head.position.y = 1.82;
+        group.add(head);
+
+        const shorts = new THREE.Mesh(
+          new THREE.BoxGeometry(0.46, 0.42, 0.28),
+          new THREE.MeshStandardMaterial({ color: jerseyColor, roughness: 0.6 })
+        );
+        shorts.position.y = 0.92;
+        group.add(shorts);
+
+        // Left Leg Group (Pivot at hip y = 0.8)
+        const leftLegGroup = new THREE.Group();
+        leftLegGroup.position.set(-0.12, 0.8, 0);
+
+        const leftLeg = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.07, 0.06, 0.75, 8),
+          new THREE.MeshStandardMaterial({ color: 0xa87148, roughness: 0.8 })
+        );
+        leftLeg.position.set(0, -0.38, 0);
+        leftLegGroup.add(leftLeg);
+
+        const leftShoe = new THREE.Mesh(
+          new THREE.BoxGeometry(0.12, 0.12, 0.22),
+          new THREE.MeshStandardMaterial({ color: trimColor, roughness: 0.4 })
+        );
+        leftShoe.position.set(0, -0.74, 0.04);
+        leftLegGroup.add(leftShoe);
+        group.add(leftLegGroup);
+
+        // Right Leg Group (Pivot at hip y = 0.8)
+        const rightLegGroup = new THREE.Group();
+        rightLegGroup.position.set(0.12, 0.8, 0);
+
+        const rightLeg = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.07, 0.06, 0.75, 8),
+          new THREE.MeshStandardMaterial({ color: 0xa87148, roughness: 0.8 })
+        );
+        rightLeg.position.set(0, -0.38, 0);
+        rightLegGroup.add(rightLeg);
+
+        const rightShoe = new THREE.Mesh(
+          new THREE.BoxGeometry(0.12, 0.12, 0.22),
+          new THREE.MeshStandardMaterial({ color: trimColor, roughness: 0.4 })
+        );
+        rightShoe.position.set(0, -0.74, 0.04);
+        rightLegGroup.add(rightShoe);
+        group.add(rightLegGroup);
+
+        const leftArm = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.06, 0.05, 0.6, 8),
+          new THREE.MeshStandardMaterial({ color: 0xa87148, roughness: 0.8 })
+        );
+        leftArm.position.set(-0.32, 1.3, 0);
+        group.add(leftArm);
+
+        const rightArm = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.06, 0.05, 0.6, 8),
+          new THREE.MeshStandardMaterial({ color: 0xa87148, roughness: 0.8 })
+        );
+        rightArm.position.set(0.32, 1.3, 0);
+        group.add(rightArm);
+
+        group.userData = {
+          name,
+          number,
+          isWarriors,
+          rating3PT,
+          leftArm,
+          rightArm,
+          torso,
+          leftLegGroup,
+          rightLegGroup,
+          walkCycle: 0,
+          lastPos: null,
+          isSettingPick: false
+        };
+        scene.add(group);
+        return group;
+      }
+
+      // Offensive Warriors Players (Stats & Base Position)
+      const warriorsRoster = [
+        { name: 'S. CURRY', num: 30, rating: 99, pos: new THREE.Vector3(0.5, 0, 0.2) },
+        { name: 'K. THOMPSON', num: 11, rating: 95, pos: new THREE.Vector3(-1.8, 0, -3.8) },
+        { name: 'K. DURANT', num: 35, rating: 96, pos: new THREE.Vector3(1.2, 0, -3.2) },
+        { name: 'D. GREEN', num: 23, rating: 74, pos: new THREE.Vector3(-3.2, 0, 1.8) },
+        { name: 'A. IGUODALA', num: 9, rating: 80, pos: new THREE.Vector3(-4.0, 0, -1.2) }
+      ];
+
+      // Defensive Rockets Players
+      const rocketsRoster = [
+        { name: 'J. HARDEN', num: 13, pos: new THREE.Vector3(-0.6, 0, 0.3) },
+        { name: 'C. CAPELA', num: 15, pos: new THREE.Vector3(-4.8, 0, -0.6) },
+        { name: 'P. TUCKER', num: 17, pos: new THREE.Vector3(-2.4, 0, -2.8) },
+        { name: 'E. GORDON', num: 10, pos: new THREE.Vector3(0.2, 0, -2.4) },
+        { name: 'A. RIVERS', num: 25, pos: new THREE.Vector3(-2.8, 0, 1.6) }
+      ];
+
+      const offensePlayers = warriorsRoster.map((p) => {
+        const mesh = createPlayerMesh(true, p.name, p.num, p.rating);
+        mesh.position.copy(p.pos);
+        mesh.userData.basePos = p.pos.clone();
+        return mesh;
+      });
+
+      const defensePlayers = rocketsRoster.map((p) => {
+        const mesh = createPlayerMesh(false, p.name, p.num);
+        mesh.position.copy(p.pos);
+        mesh.userData.basePos = p.pos.clone();
+        mesh.rotation.y = Math.PI / 2;
+        return mesh;
+      });
+
+      let activePlayerIndex = 0; // S. Curry default
+      let ballCarrier = offensePlayers[0];
+
+      // Pass Target Highlight Ring (Visible while holding PASS)
+      const passRingGeo = new THREE.RingGeometry(0.52, 0.68, 32);
+      const passRingMat = new THREE.MeshBasicMaterial({
+        color: 0x38bdf8,
+        side: THREE.DoubleSide,
+        transparent: true,
+        opacity: 0.92
+      });
+      const passTargetRing = new THREE.Mesh(passRingGeo, passRingMat);
+      passTargetRing.rotation.x = -Math.PI / 2;
+      passTargetRing.position.y = 0.025;
+      passTargetRing.visible = false;
+      scene.add(passTargetRing);
+
+      // ==========================================
+      // 7. CONFETTI SYSTEM
+      // ==========================================
+      const ctxConfetti = confettiCanvas.getContext('2d');
+      let confettiParticles = [];
+      function resizeConfetti() {
+        confettiCanvas.width = window.innerWidth;
+        confettiCanvas.height = window.innerHeight;
+      }
+      resizeConfetti();
+
+      function spawnConfetti(count = 70) {
+        const colors = ['#1d428a', '#ffc72c', '#ce1141', '#ffffff'];
+        for (let i = 0; i < count; i++) {
+          confettiParticles.push({
+            x: window.innerWidth * 0.5 + (Math.random() - 0.5) * 240,
+            y: window.innerHeight * 0.35 + (Math.random() - 0.5) * 80,
+            vx: (Math.random() - 0.5) * 14,
+            vy: -Math.random() * 12 - 4,
+            size: Math.random() * 8 + 4,
+            color: colors[Math.floor(Math.random() * colors.length)],
+            rotation: Math.random() * 360,
+            rotSpeed: (Math.random() - 0.5) * 15,
+            opacity: 1
+          });
+        }
+      }
+
+      function updateConfetti() {
+        ctxConfetti.clearRect(0, 0, confettiCanvas.width, confettiCanvas.height);
+        for (let i = confettiParticles.length - 1; i >= 0; i--) {
+          const p = confettiParticles[i];
+          p.x += p.vx;
+          p.y += p.vy;
+          p.vy += 0.35;
+          p.rotation += p.rotSpeed;
+          p.opacity -= 0.015;
+          if (p.opacity <= 0) {
+            confettiParticles.splice(i, 1);
+            continue;
+          }
+          ctxConfetti.save();
+          ctxConfetti.translate(p.x, p.y);
+          ctxConfetti.rotate((p.rotation * Math.PI) / 180);
+          ctxConfetti.globalAlpha = p.opacity;
+          ctxConfetti.fillStyle = p.color;
+          ctxConfetti.fillRect(-p.size / 2, -p.size / 2, p.size, p.size * 0.7);
+          ctxConfetti.restore();
+        }
+      }
+
+      // ==========================================
+      // 8. ADVANCED SHOT METER, STATS & DEFENSE CONTEST ENGINE
+      // ==========================================
+      let isChargingShot = false;
+      let shotChargeStart = 0;
+      let shotDuration = 800; // ~0.8 seconds fill time as requested
+      let ballInAir = false;
+      let scoredThisShot = false;
+      let shotOriginDist = 0;
+      let isShotWillMake = false;
+
+      // Pass hold and recipient highlighting
+      let isHoldingPass = false;
+      let targetPassIndex = 1;
+
+      function getBestPassTargetIndex() {
+        let bestIdx = (activePlayerIndex + 1) % offensePlayers.length;
+        let maxDot = -999;
+        const currentP = ballCarrier.position;
+        const hasDir = Math.hypot(joyDir.x, joyDir.z) > 0.15;
+
+        offensePlayers.forEach((p, idx) => {
+          if (idx === activePlayerIndex) return;
+          if (hasDir) {
+            const toTeammate = new THREE.Vector2(p.position.x - currentP.x, p.position.z - currentP.z).normalize();
+            const joyNorm = new THREE.Vector2(joyDir.x, joyDir.z).normalize();
+            const dot = toTeammate.dot(joyNorm);
+            if (dot > maxDot) {
+              maxDot = dot;
+              bestIdx = idx;
+            }
+          }
+        });
+        return bestIdx;
+      }
+
+      function startHoldPass() {
+        initAudio();
+        if (ballInAir) return;
+        isHoldingPass = true;
+        targetPassIndex = getBestPassTargetIndex();
+        passTargetRing.visible = true;
+        const targetP = offensePlayers[targetPassIndex];
+        passTargetRing.position.set(targetP.position.x, 0.025, targetP.position.z);
+      }
+
+      function endHoldPass() {
+        if (!isHoldingPass) return;
+        isHoldingPass = false;
+        passTargetRing.visible = false;
+        passToPlayer(targetPassIndex);
+      }
+
+      // Calculate dynamic contest percentage and green window
+      function calculateShotProfile() {
+        const startP = ballCarrier.position;
+        const distToBasket = Math.hypot(HOOP_X - startP.x, HOOP_Z - startP.z);
+
+        // Find closest defender distance
+        let minDefDist = 999;
+        defensePlayers.forEach((d) => {
+          const dDist = Math.hypot(d.position.x - startP.x, d.position.z - startP.z);
+          if (dDist < minDefDist) minDefDist = dDist;
+        });
+
+        // Contest Percentage
+        let contestPct = 0;
+        let contestCategory = 'Wide Open';
+        if (minDefDist < 0.8) {
+          contestPct = Math.round(75 + (0.8 - minDefDist) * 35);
+          contestCategory = `${contestPct}% Smothered`;
+        } else if (minDefDist < 1.6) {
+          contestPct = Math.round(20 + (1.6 - minDefDist) * 60);
+          contestCategory = `${contestPct}% Contested`;
+        } else if (minDefDist < 2.4) {
+          contestPct = Math.round((2.4 - minDefDist) * 20);
+          contestCategory = `${contestPct}% Open`;
+        }
+
+        // Green Window Calculation (74% to 88% height on 800ms meter)
+        const rating = ballCarrier.userData.rating3PT || 85;
+        const ratingMod = (rating - 85) * 0.0015;
+        let distMod = 0;
+        let isDunk = false;
+        if (distToBasket < 2.4) {
+          distMod = 0.08;
+          isDunk = true;
+        } else if (distToBasket > 7.5) {
+          distMod = -0.04;
+        }
+
+        const contestPenalty = (contestPct / 100) * 0.06;
+        const staminaPenalty = (100 - stamina) * 0.0004;
+        const greenCenter = 0.81;
+        const halfWindow = Math.max(0.065 + ratingMod + distMod - contestPenalty - staminaPenalty, 0.025);
+
+        return {
+          distToBasket,
+          minDefDist,
+          contestPct,
+          contestCategory,
+          isDunk,
+          greenMin: greenCenter - halfWindow,
+          greenMax: greenCenter + halfWindow
+        };
+      }
+
+      function updateContextButtons() {
+        if (!ballCarrier) return;
+        const dist = Math.hypot(HOOP_X - ballCarrier.position.x, HOOP_Z - ballCarrier.position.z);
+
+        if (dist < 2.6) {
+          btnShoot.className = 'context-btn btn-shoot-dunk';
+          shootBtnIcon.textContent = '💥';
+          shootBtnLabel.textContent = 'DUNK / LAYUP';
+        } else if (dist < 5.8) {
+          btnShoot.className = 'context-btn btn-shoot-mid';
+          shootBtnIcon.textContent = '🎯';
+          shootBtnLabel.textContent = 'PULL-UP MID';
+        } else {
+          btnShoot.className = 'context-btn btn-shoot-3pt';
+          shootBtnIcon.textContent = '🏹';
+          shootBtnLabel.textContent = 'SHOOT 3PT';
+        }
+      }
+
+      // ==========================================
+      // 9. GESTURE & BUTTON SHOOTING/PASSING MECHANICS
+      // ==========================================
+      function startShooting() {
+        initAudio();
+        if (ballInAir) return;
+        isChargingShot = true;
+        shotChargeStart = performance.now();
+        verticalShotMeter.classList.add('visible');
+        vMeterFill.style.height = '0%';
+        vMeterNeedle.style.bottom = '0%';
+
+        // Drain minor burst stamina on rise
+        stamina = Math.max(stamina - 6, 5);
+      }
+
+      function releaseShooting() {
+        if (!isChargingShot || ballInAir) return;
+        isChargingShot = false;
+        verticalShotMeter.classList.remove('visible');
+
+        const elapsed = performance.now() - shotChargeStart;
+        const ratio = Math.min(elapsed / shotDuration, 1.2);
+
+        const profile = calculateShotProfile();
+        const isGreen = ratio >= profile.greenMin && ratio <= profile.greenMax;
+
+        // Foul / And-One Chance on heavily contested drives
+        let andOneFoul = false;
+        if (profile.contestPct > 55 && profile.isDunk && Math.random() < 0.28) {
+          andOneFoul = true;
+        }
+
+        // Timing quality & defender proximity make calculation
+        let willMake = false;
+        if (isGreen) {
+          willMake = true; // CRITICAL: Perfect timing = 100% make probability, regardless of defender contest!
+          consecutiveMakes++;
+          aiDefenseIntensity = Math.min(aiDefenseIntensity + 0.15, 1.8);
+          playSound('green');
+          feedbackGrade.className = 'feedback-box feedback-green';
+          feedbackGrade.textContent = 'GREEN RELEASE! PERFECT 🎯';
+          feedbackDetail.textContent = '100% Timing | Perfect Release';
+        } else {
+          const timingDiff = Math.abs(ratio - 0.81);
+          const timingScore = Math.max(1.0 - timingDiff * 3.4, 0);
+          const openScore = Math.min(profile.minDefDist / 2.2, 1.0);
+          const playerBonus = ((ballCarrier.userData.rating3PT || 85) - 75) / 100;
+          const makeProb = Math.max(Math.min(timingScore * 0.65 * (0.35 + openScore * 0.65) + playerBonus * 0.15, 0.78), 0.04);
+          willMake = Math.random() < makeProb;
+
+          const isEarly = ratio < profile.greenMin;
+          feedbackGrade.className = 'feedback-box feedback-yellow';
+          feedbackGrade.textContent = isEarly ? 'SLIGHTLY EARLY' : 'SLIGHTLY LATE';
+          feedbackDetail.textContent = `${Math.round(makeProb * 100)}% Chance | ${profile.contestCategory}`;
+        }
+
+        isShotWillMake = willMake;
+        shotFeedbackHud.classList.add('show');
+        setTimeout(() => shotFeedbackHud.classList.remove('show'), 1600);
+
+        if (andOneFoul) {
+          setTimeout(() => showRefereeBanner('AND-ONE! DEFENSIVE FOUL'), 300);
+        }
+
+        const startP = ballCarrier.position.clone();
+        shotOriginDist = Math.hypot(HOOP_X - startP.x, HOOP_Z - startP.z);
+        const pts = shotOriginDist > 6.1 ? 3 : 2;
+        triggerShotTrajectory(true, startP, willMake, isGreen, pts, profile.isDunk);
+      }
+
+      // Parabolic Bézier Shot Trajectory Engine
+      const activeShot = {
+        active: false,
+        isUser: true,
+        isGreen: false,
+        willMake: false,
+        startTime: 0,
+        duration: 1000,
+        p0: new THREE.Vector3(),
+        apex: new THREE.Vector3(),
+        pTarget: new THREE.Vector3(),
+        points: 2,
+        scored: false
+      };
+
+      function triggerShotTrajectory(isUser, startP, willMake, isGreen, pts, isDunk) {
+        ballInAir = true;
+        scoredThisShot = false;
+
+        const timeToHoop = isDunk ? 0.58 : 1.05;
+        activeShot.active = true;
+        activeShot.isUser = isUser;
+        activeShot.isGreen = isGreen;
+        activeShot.willMake = willMake;
+        activeShot.startTime = performance.now();
+        activeShot.duration = timeToHoop * 1000;
+        activeShot.p0.set(startP.x, 1.8, startP.z);
+        activeShot.points = pts;
+        activeShot.scored = false;
+
+        const dist = Math.hypot(HOOP_X - startP.x, HOOP_Z - startP.z);
+        const apexY = Math.max(startP.y, HOOP_Y) + (isDunk ? 0.75 : 1.85 + Math.min(dist / 5, 1.2));
+        activeShot.apex.set((startP.x + HOOP_X) / 2, apexY, (startP.z + HOOP_Z) / 2);
+
+        if (willMake) {
+          activeShot.pTarget.set(HOOP_X, HOOP_Y + 0.04, HOOP_Z);
+        } else {
+          const missOffset = Math.random() > 0.5 ? 0.22 : -0.22;
+          activeShot.pTarget.set(HOOP_X + missOffset, HOOP_Y + 0.08, HOOP_Z + (Math.random() - 0.5) * 0.2);
+        }
+
+        ballBody.position.set(startP.x, 1.8, startP.z);
+        ballMesh.position.set(startP.x, 1.8, startP.z);
+      }
+
+      // Houston Rockets AI Offense Controller
+      let houstonBallCarrierIndex = 0; // J. Harden default
+      let houstonPossessionPhase = 'dribble'; // 'dribble', 'passed', 'shooting'
+      let houstonActionTimer = 0;
+
+      function startHoustonAiPossession() {
+        activePossession = 'home';
+        homeScoreRow.classList.add('possession-active');
+        awayScoreRow.classList.remove('possession-active');
+        shotClock = 24;
+        houstonBallCarrierIndex = 0; // Harden takes inbounds
+        houstonPossessionPhase = 'dribble';
+        houstonActionTimer = performance.now();
+
+        const harden = defensePlayers[0];
+        harden.position.set(3.0, 0, 0.4);
+        ballBody.position.set(harden.position.x - 0.35, 1.2, harden.position.z);
+        ballMesh.position.copy(ballBody.position);
+        ballInAir = false;
+        showRefereeBanner('HOUSTON POSSESSION');
+      }
+
+      function resetWarriorsPossession() {
+        activePossession = 'away';
+        awayScoreRow.classList.add('possession-active');
+        homeScoreRow.classList.remove('possession-active');
+        shotClock = 24;
+        activePlayerIndex = 0; // Curry
+        ballCarrier = offensePlayers[activePlayerIndex];
+        ballCarrier.position.set(0.8, 0, 0.2);
+        ballBody.position.set(ballCarrier.position.x + 0.35, 1.2, ballCarrier.position.z);
+        ballMesh.position.copy(ballBody.position);
+        ballInAir = false;
+        playerTagName.textContent = `${ballCarrier.userData.name} #${ballCarrier.userData.number}`;
+        updateContextButtons();
+      }
+
+      function passToPlayer(index) {
+        initAudio();
+        if (ballInAir || index === activePlayerIndex) return;
+        playSound('squeak');
+        activePlayerIndex = index;
+        ballCarrier = offensePlayers[activePlayerIndex];
+        playerTagName.textContent = `${ballCarrier.userData.name} #${ballCarrier.userData.number}`;
+        updateContextButtons();
+      }
+
+      function passBall() {
+        const nextIdx = getBestPassTargetIndex();
+        passToPlayer(nextIdx);
+      }
+
+      // Call Pick & Roll Screen from Draymond Green
+      callPickBtn.addEventListener('click', () => {
+        initAudio();
+        playSound('squeak');
+        const screener = offensePlayers[3]; // D. Green
+        screener.userData.isSettingPick = true;
+        showRefereeBanner('PICK & ROLL CALLED');
+      });
+
+      // Context button events
+      btnShoot.addEventListener('touchstart', (e) => { e.preventDefault(); startShooting(); });
+      btnShoot.addEventListener('touchend', (e) => { e.preventDefault(); releaseShooting(); });
+      btnShoot.addEventListener('mousedown', startShooting);
+      btnShoot.addEventListener('mouseup', releaseShooting);
+
+      // Pass button with Hold-to-Highlight-Target
+      btnPass.addEventListener('touchstart', (e) => { e.preventDefault(); startHoldPass(); });
+      btnPass.addEventListener('touchend', (e) => { e.preventDefault(); endHoldPass(); });
+      btnPass.addEventListener('mousedown', startHoldPass);
+      btnPass.addEventListener('mouseup', endHoldPass);
+
+      btnTurbo.addEventListener('touchstart', (e) => { e.preventDefault(); isSprinting = true; btnTurbo.classList.add('sprinting'); });
+      btnTurbo.addEventListener('touchend', (e) => { e.preventDefault(); isSprinting = false; btnTurbo.classList.remove('sprinting'); });
+      btnTurbo.addEventListener('mousedown', () => { isSprinting = true; btnTurbo.classList.add('sprinting'); });
+      btnTurbo.addEventListener('mouseup', () => { isSprinting = false; btnTurbo.classList.remove('sprinting'); });
+
+      // Swipe-to-Shoot Gesture on Screen
+      let swipeStartY = 0;
+      let swipeStartTime = 0;
+      let isSwiping = false;
+
+      window.addEventListener('touchstart', (e) => {
+        if (
+          e.target.closest('#loading-screen') ||
+          e.target.closest('.touch-controls-container') ||
+          e.target.closest('.top-nav') ||
+          e.target.closest('.broadcast-scorebug-container')
+        ) return;
+        if (e.touches.length > 0) {
+          isSwiping = true;
+          swipeStartY = e.touches[0].clientY;
+          swipeStartTime = performance.now();
+        }
+      }, { passive: true });
+
+      window.addEventListener('touchend', (e) => {
+        if (!isSwiping) return;
+        isSwiping = false;
+        if (e.changedTouches.length > 0) {
+          const dy = swipeStartY - e.changedTouches[0].clientY;
+          const dt = performance.now() - swipeStartTime;
+          // Upward swipe gesture detected!
+          if (dy > 45 && dt < 600) {
+            startShooting();
+            setTimeout(releaseShooting, Math.min(Math.max(dt, 200), 550));
+          }
+        }
+      }, { passive: true });
+
+      // Keyboard support
+      window.addEventListener('keydown', (e) => {
+        if (e.code === 'Space' || e.key === 'k') startShooting();
+        if ((e.key === 'p' || e.key === 'j') && !isHoldingPass) startHoldPass();
+        if (e.key === 'Shift') { isSprinting = true; btnTurbo.classList.add('sprinting'); }
+      });
+      window.addEventListener('keyup', (e) => {
+        if (e.code === 'Space' || e.key === 'k') releaseShooting();
+        if (e.key === 'p' || e.key === 'j') endHoldPass();
+        if (e.key === 'Shift') { isSprinting = false; btnTurbo.classList.remove('sprinting'); }
+      });
+
+      // Virtual Joystick
+      const joyBase = document.getElementById('joystick-base');
+      const joyThumb = document.getElementById('joystick-thumb');
+      let joyActive = false;
+      let joyDir = { x: 0, z: 0 };
+
+      function handleJoyMove(cx, cy) {
+        const rect = joyBase.getBoundingClientRect();
+        const centerX = rect.left + rect.width / 2;
+        const centerY = rect.top + rect.height / 2;
+        const dx = cx - centerX;
+        const dy = cy - centerY;
+        const dist = Math.hypot(dx, dy);
+        const maxR = 36;
+        const angle = Math.atan2(dy, dx);
+        const clampedR = Math.min(dist, maxR);
+
+        const thumbX = Math.cos(angle) * clampedR;
+        const thumbY = Math.sin(angle) * clampedR;
+        joyThumb.style.transform = `translate(calc(-50% + ${thumbX}px), calc(-50% + ${thumbY}px))`;
+
+        joyDir.x = (thumbX / maxR);
+        joyDir.z = (thumbY / maxR);
+      }
+
+      joyBase.addEventListener('touchstart', (e) => {
+        joyActive = true;
+        if (e.touches.length > 0) handleJoyMove(e.touches[0].clientX, e.touches[0].clientY);
+      }, { passive: false });
+
+      window.addEventListener('touchmove', (e) => {
+        if (joyActive && e.touches.length > 0) handleJoyMove(e.touches[0].clientX, e.touches[0].clientY);
+      }, { passive: false });
+
+      window.addEventListener('touchend', () => {
+        if (joyActive) {
+          joyActive = false;
+          joyDir = { x: 0, z: 0 };
+          joyThumb.style.transform = 'translate(-50%, -50%)';
+        }
+      });
+
+      // Keyboard movement (WASD)
+      const keysDown = {};
+      window.addEventListener('keydown', (e) => { keysDown[e.key.toLowerCase()] = true; });
+      window.addEventListener('keyup', (e) => { keysDown[e.key.toLowerCase()] = false; });
+
+      // ==========================================
+      // 10. TIMERS & VIOLATIONS (24S SHOT CLOCK)
+      // ==========================================
+      setInterval(() => {
+        // Game Clock Countdown
+        if (gameSeconds > 0) {
+          gameSeconds--;
+          const m = Math.floor(gameSeconds / 60);
+          const s = (gameSeconds % 60).toString().padStart(2, '0');
+          gameTimeLabel.textContent = `${m}:${s}`;
+        }
+
+        // Shot Clock
+        shotClock--;
+        if (shotClock <= 0) {
+          showRefereeBanner('24-SECOND SHOT CLOCK VIOLATION');
+          shotClock = 24;
+        }
+        shotClockLabel.textContent = shotClock.toString();
+        if (shotClock <= 5) {
+          shotClockLabel.classList.add('danger');
+        } else {
+          shotClockLabel.classList.remove('danger');
+        }
+
+        // Stamina Passive Recharge
+        if (!isSprinting && stamina < 100) {
+          stamina = Math.min(stamina + 3.5, 100);
+        }
+        staminaFill.style.width = `${stamina}%`;
+        if (stamina < 30) {
+          staminaTrack.classList.add('stamina-low');
+        } else {
+          staminaTrack.classList.remove('stamina-low');
+        }
+      }, 1000);
+
+      // Camera Toggle
+      camToggleBtn.addEventListener('click', () => {
+        currentCamIndex = (currentCamIndex + 1) % CAMERAS.length;
+        const c = CAMERAS[currentCamIndex];
+        camToggleBtn.textContent = `🎥 ${c.name}`;
+        camera.position.copy(c.pos);
+        camera.lookAt(c.target);
+      });
+
+      soundBtn.addEventListener('click', () => {
+        initAudio();
+        soundEnabled = !soundEnabled;
+        soundBtn.textContent = soundEnabled ? '🔊' : '🔇';
+      });
+
+      wagerBtn.addEventListener('click', () => wagerModal.classList.add('open'));
+      document.getElementById('wager-chips').addEventListener('click', (e) => {
+        const chip = e.target.closest('.wager-chip');
+        if (!chip) return;
+        document.querySelectorAll('.wager-chip').forEach((c) => c.classList.remove('selected'));
+        chip.classList.add('selected');
+        currentWager = parseInt(chip.dataset.val, 10);
+        payoutPreview.textContent = `${(currentWager * 2).toLocaleString()} VC 🪙`;
+      });
+      startMatchBtn.addEventListener('click', () => {
+        initAudio();
+        wagerModal.classList.remove('open');
+      });
+
+      // ==========================================
+      // 11. ANIMATION & GAME LOOP WITH ADAPTIVE AI & RUNNING LEGS
+      // ==========================================
+      const timeStep = 1 / 60;
+      let lastTime = performance.now();
+      let activeCutterIndex = -1;
+      let cutStartTime = 0;
+      let lastCutTime = performance.now();
+      const cutTargetPos = new THREE.Vector3();
+
+      function animate() {
+        requestAnimationFrame(animate);
+
+        const now = performance.now();
+        const dt = (now - lastTime) / 1000;
+        lastTime = now;
+
+        world.step(timeStep, Math.min(dt, 0.1), 3);
+
+        // Player Movement & Stamina Consumption
+        let moveX = joyDir.x;
+        let moveZ = joyDir.z;
+
+        if (keysDown['a'] || keysDown['arrowleft']) moveX -= 1;
+        if (keysDown['d'] || keysDown['arrowright']) moveX += 1;
+        if (keysDown['w'] || keysDown['arrowup']) moveZ -= 1;
+        if (keysDown['s'] || keysDown['arrowdown']) moveZ += 1;
+
+        const isMoving = Math.hypot(moveX, moveZ) > 0.05;
+
+        if (isMoving && ballCarrier && !ballInAir) {
+          // Sprint Speed Multiplier
+          const speed = (isSprinting && stamina > 10) ? 0.14 : 0.08;
+          if (isSprinting && stamina > 10) {
+            stamina = Math.max(stamina - 0.45, 0);
+          }
+
+          ballCarrier.position.x += moveX * speed;
+          ballCarrier.position.z += moveZ * speed;
+
+          ballCarrier.position.x = Math.max(Math.min(ballCarrier.position.x, 8), -5.8);
+          ballCarrier.position.z = Math.max(Math.min(ballCarrier.position.z, 6), -6);
+
+          updateContextButtons();
+        }
+
+        // Running Animation (Legs swing back and forth when moving)
+        const allPlayers = [...offensePlayers, ...defensePlayers];
+        allPlayers.forEach((p) => {
+          if (!p.userData || !p.userData.leftLegGroup || !p.userData.rightLegGroup) return;
+          if (!p.userData.lastPos) p.userData.lastPos = p.position.clone();
+          const distMoved = p.position.distanceTo(p.userData.lastPos);
+          p.userData.lastPos.copy(p.position);
+
+          if (distMoved > 0.002) {
+            p.userData.walkCycle += Math.min(distMoved * 16, 0.45);
+            p.userData.leftLegGroup.rotation.x = Math.sin(p.userData.walkCycle) * 0.55;
+            p.userData.rightLegGroup.rotation.x = -Math.sin(p.userData.walkCycle) * 0.55;
+          } else {
+            p.userData.leftLegGroup.rotation.x = THREE.MathUtils.lerp(p.userData.leftLegGroup.rotation.x, 0, 0.18);
+            p.userData.rightLegGroup.rotation.x = THREE.MathUtils.lerp(p.userData.rightLegGroup.rotation.x, 0, 0.18);
+          }
+        });
+
+        // AI Teammates Cutting to the Basket Occasionally
+        if (activePossession === 'away' && !ballInAir && !isChargingShot) {
+          if (activeCutterIndex === -1 && now - lastCutTime > 4500) {
+            const candidates = [1, 2, 4].filter((idx) => idx !== activePlayerIndex);
+            if (candidates.length > 0) {
+              activeCutterIndex = candidates[Math.floor(Math.random() * candidates.length)];
+              cutStartTime = now;
+              cutTargetPos.set(HOOP_X + 1.2, 0, HOOP_Z + (Math.random() - 0.5) * 1.6);
+            }
+          } else if (activeCutterIndex !== -1) {
+            const cutElapsed = now - cutStartTime;
+            const cutter = offensePlayers[activeCutterIndex];
+            if (cutElapsed < 1900) {
+              // Sprints toward rim
+              cutter.position.lerp(cutTargetPos, 0.045);
+            } else if (cutElapsed < 3400) {
+              // Resets back to open perimeter
+              if (cutter.userData.basePos) cutter.position.lerp(cutter.userData.basePos, 0.035);
+            } else {
+              activeCutterIndex = -1;
+              lastCutTime = now;
+            }
+          }
+        }
+
+        // Pick & Roll Screener AI
+        const screener = offensePlayers[3];
+        if (screener.userData.isSettingPick && ballCarrier) {
+          const targetPickX = ballCarrier.position.x - 0.8;
+          const targetPickZ = ballCarrier.position.z + 0.3;
+          screener.position.x = THREE.MathUtils.lerp(screener.position.x, targetPickX, 0.06);
+          screener.position.z = THREE.MathUtils.lerp(screener.position.z, targetPickZ, 0.06);
+
+          if (screener.userData.leftArm) screener.userData.leftArm.rotation.z = 0.8;
+          if (screener.userData.rightArm) screener.userData.rightArm.rotation.z = -0.8;
+        }
+
+        // Pass Target Ring Under Feet while PASS is held
+        if (isHoldingPass) {
+          targetPassIndex = getBestPassTargetIndex();
+          const targetP = offensePlayers[targetPassIndex];
+          passTargetRing.visible = true;
+          passTargetRing.position.set(targetP.position.x, 0.025, targetP.position.z);
+          passTargetRing.rotation.z += 0.06;
+        } else {
+          passTargetRing.visible = false;
+        }
+
+        // Ball Flight & Parabolic Bézier Shot Trajectory
+        if (activeShot.active) {
+          const elapsed = now - activeShot.startTime;
+          const u = Math.min(elapsed / activeShot.duration, 1.0);
+
+          const invU = 1 - u;
+          const curX = invU * invU * activeShot.p0.x + 2 * invU * u * activeShot.apex.x + u * u * activeShot.pTarget.x;
+          const curY = invU * invU * activeShot.p0.y + 2 * invU * u * activeShot.apex.y + u * u * activeShot.pTarget.y;
+          const curZ = invU * invU * activeShot.p0.z + 2 * invU * u * activeShot.apex.z + u * u * activeShot.pTarget.z;
+
+          ballBody.position.set(curX, curY, curZ);
+          ballMesh.position.set(curX, curY, curZ);
+          ballMesh.rotation.x -= 0.16;
+
+          // Made Basket Detection Trigger
+          if (u >= 0.95 && !activeShot.scored) {
+            activeShot.scored = true;
+            if (activeShot.willMake) {
+              scoredThisShot = true;
+              playSound('swish');
+              showFloatingScore(activeShot.points, new THREE.Vector3(HOOP_X, HOOP_Y + 0.6, HOOP_Z));
+
+              if (activeShot.isUser) {
+                awayScore += activeShot.points;
+                awayPts.textContent = awayScore.toString();
+                // Confetti: use small confetti burst ONLY for green releases
+                if (activeShot.isGreen) {
+                  spawnConfetti(28);
+                }
+              } else {
+                homeScore += activeShot.points;
+                homePts.textContent = homeScore.toString();
+              }
+            } else {
+              playSound('bounce', 0.85);
+            }
+          }
+
+          if (u >= 1.0) {
+            activeShot.active = false;
+            if (activeShot.willMake) {
+              ballBody.velocity.set(0, -2.5, 0);
+            } else {
+              ballBody.velocity.set((Math.random() - 0.5) * 3, 2.8, (Math.random() - 0.5) * 3);
+            }
+
+            // Transition possession after shot completes
+            setTimeout(() => {
+              ballInAir = false;
+              if (activeShot.isUser) {
+                startHoustonAiPossession();
+              } else {
+                resetWarriorsPossession();
+              }
+            }, 1600);
+          }
+        } else if (!ballInAir) {
+          if (activePossession === 'away' && ballCarrier) {
+            // User dribbling ball
+            const bounceY = 0.35 + Math.abs(Math.sin(now * 0.012)) * 0.65;
+            ballMesh.position.set(ballCarrier.position.x + 0.35, bounceY, ballCarrier.position.z + 0.2);
+            ballBody.position.copy(ballMesh.position);
+
+            if (ballCarrier.userData.rightArm) {
+              ballCarrier.userData.rightArm.rotation.x = Math.sin(now * 0.012) * 0.5 + 0.5;
+            }
+          } else if (activePossession === 'home') {
+            // Houston Rockets AI Offense Engine
+            const hCarrier = defensePlayers[houstonBallCarrierIndex];
+            const bounceY = 0.35 + Math.abs(Math.sin(now * 0.013)) * 0.65;
+            ballMesh.position.set(hCarrier.position.x - 0.35, bounceY, hCarrier.position.z + 0.1);
+            ballBody.position.copy(ballMesh.position);
+
+            if (hCarrier.userData.leftArm) {
+              hCarrier.userData.leftArm.rotation.x = Math.sin(now * 0.013) * 0.5 + 0.5;
+            }
+
+            // Houston AI Dribbles toward the basket
+            hCarrier.position.x = THREE.MathUtils.lerp(hCarrier.position.x, HOOP_X + 2.5, 0.024);
+            hCarrier.position.z = THREE.MathUtils.lerp(hCarrier.position.z, HOOP_Z + Math.sin(now * 0.003) * 1.5, 0.024);
+
+            // Houston AI Passing between teammates
+            if (now - houstonActionTimer > 2500 && houstonPossessionPhase === 'dribble') {
+              houstonPossessionPhase = 'passed';
+              houstonActionTimer = now;
+              houstonBallCarrierIndex = (houstonBallCarrierIndex + 1 + Math.floor(Math.random() * 2)) % defensePlayers.length;
+              playSound('squeak');
+            }
+
+            // Houston AI Attempts shot within the shot clock
+            const distToBasket = Math.hypot(HOOP_X - hCarrier.position.x, HOOP_Z - hCarrier.position.z);
+            if ((distToBasket < 5.2 && now - houstonActionTimer > 1800) || shotClock <= 3) {
+              houstonPossessionPhase = 'shooting';
+              const aiPts = distToBasket > 6.1 ? 3 : 2;
+              const defDist = Math.hypot(ballCarrier.position.x - hCarrier.position.x, ballCarrier.position.z - hCarrier.position.z);
+              const aiWillMake = defDist > 1.2 ? Math.random() < 0.72 : Math.random() < 0.38;
+              triggerShotTrajectory(false, hCarrier.position.clone(), aiWillMake, false, aiPts, distToBasket < 2.2);
+            }
+          }
+        }
+
+        // Active Player Nameplate: strictly ONE exists, moved to active controlled player
+        if (playerHudTag) {
+          if (ballCarrier && activePossession === 'away') {
+            const screenPos = ballCarrier.position.clone();
+            screenPos.y += 2.2;
+            screenPos.project(camera);
+            if (screenPos.z < 1.0) {
+              playerHudTag.style.display = 'flex';
+              const sx = (screenPos.x * 0.5 + 0.5) * window.innerWidth;
+              const sy = (-(screenPos.y * 0.5) + 0.5) * window.innerHeight;
+              playerHudTag.style.left = `${sx}px`;
+              playerHudTag.style.top = `${sy}px`;
+            } else {
+              playerHudTag.style.display = 'none';
+            }
+          } else {
+            playerHudTag.style.display = 'none';
+          }
+        }
+
+        // 2K Vertical Shot Meter (Projected above shooter head over 0.8s)
+        if (ballCarrier && isChargingShot) {
+          const meter3D = ballCarrier.position.clone();
+          meter3D.y += 2.45;
+          meter3D.project(camera);
+          const mx = (meter3D.x * 0.5 + 0.5) * window.innerWidth;
+          const my = (-(meter3D.y * 0.5) + 0.5) * window.innerHeight;
+          verticalShotMeter.style.left = `${mx}px`;
+          verticalShotMeter.style.top = `${my}px`;
+
+          const elapsed = now - shotChargeStart;
+          const ratio = Math.min(elapsed / shotDuration, 1.15);
+          const fillPct = Math.min(ratio * 100, 100);
+          vMeterFill.style.height = `${fillPct}%`;
+          vMeterNeedle.style.bottom = `${fillPct}%`;
+
+          const profile = calculateShotProfile();
+          if (ratio >= profile.greenMin && ratio <= profile.greenMax) {
+            vMeterFill.classList.add('green-hit');
+          } else {
+            vMeterFill.classList.remove('green-hit');
+          }
+        }
+
+        // Defenders Staying Between Their Man and the Basket
+        if (activePossession === 'away') {
+          // Houston defenders guard Warriors offense
+          defensePlayers.forEach((hDef, idx) => {
+            const wOff = offensePlayers[idx % offensePlayers.length];
+            const guardX = THREE.MathUtils.lerp(wOff.position.x, HOOP_X, 0.28);
+            const guardZ = THREE.MathUtils.lerp(wOff.position.z, HOOP_Z, 0.28);
+
+            if (wOff === ballCarrier) {
+              const defSpeed = 0.08 * aiDefenseIntensity;
+              hDef.position.x = THREE.MathUtils.lerp(hDef.position.x, ballCarrier.position.x - 1.05, defSpeed);
+              hDef.position.z = THREE.MathUtils.lerp(hDef.position.z, ballCarrier.position.z, defSpeed);
+              if (isChargingShot || activeShot.active) {
+                hDef.userData.leftArm.rotation.x = -2.3;
+                hDef.userData.rightArm.rotation.x = -2.3;
+              } else {
+                hDef.userData.leftArm.rotation.x = -0.3;
+                hDef.userData.rightArm.rotation.x = -0.3;
+              }
+            } else {
+              hDef.position.x = THREE.MathUtils.lerp(hDef.position.x, guardX, 0.04);
+              hDef.position.z = THREE.MathUtils.lerp(hDef.position.z, guardZ, 0.04);
+            }
+          });
+        } else {
+          // Warriors defenders guard Houston offense
+          offensePlayers.forEach((wDef, idx) => {
+            if (idx === activePlayerIndex) return; // User controls activePlayer
+            const hOff = defensePlayers[idx % defensePlayers.length];
+            const guardX = THREE.MathUtils.lerp(hOff.position.x, HOOP_X, 0.28);
+            const guardZ = THREE.MathUtils.lerp(hOff.position.z, HOOP_Z, 0.28);
+            wDef.position.x = THREE.MathUtils.lerp(wDef.position.x, guardX, 0.04);
+            wDef.position.z = THREE.MathUtils.lerp(wDef.position.z, guardZ, 0.04);
+          });
+        }
+
+        // Render Confetti
+        if (confettiParticles.length > 0) updateConfetti();
+
+        renderer.render(scene, camera);
+      }
+
+      window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        resizeConfetti();
+      });
+
+      // ==========================================
+      // 12. 2K ARENA LOADING SCREEN PROGRESSION
+      // ==========================================
+      const loadingScreen = document.getElementById('loading-screen');
+      const loadingBarFill = document.getElementById('loading-bar-fill');
+      const loadingPercentage = document.getElementById('loading-percentage');
+      const loadingStatusText = document.getElementById('loading-status-text');
+      const loadingStartBtn = document.getElementById('loading-start-btn');
+
+      const loadSteps = [
+        { pct: 28, text: 'Loading Toyota Center Arena...' },
+        { pct: 58, text: 'Calibrating 3D Players & Cannon-es Physics...' },
+        { pct: 86, text: 'Syncing 2K Shot Timing Engine...' },
+        { pct: 100, text: 'Arena Ready! Tip Off Match' }
+      ];
+
+      let curStep = 0;
+      function advanceLoading() {
+        if (curStep < loadSteps.length) {
+          const step = loadSteps[curStep];
+          loadingBarFill.style.width = `${step.pct}%`;
+          loadingPercentage.textContent = `${step.pct}%`;
+          loadingStatusText.textContent = step.text;
+          curStep++;
+          if (step.pct < 100) {
+            setTimeout(advanceLoading, 280 + Math.random() * 140);
+          }
+        }
+      }
+
+      function dismissLoadingScreen(e) {
+        if (e) {
+          if (typeof e.preventDefault === 'function') e.preventDefault();
+          if (typeof e.stopPropagation === 'function') e.stopPropagation();
+        }
+        try {
+          initAudio();
+          playSound('whistle');
+        } catch (err) {}
+
+        loadingScreen.classList.add('loaded');
+        loadingScreen.style.pointerEvents = 'none';
+        loadingScreen.style.opacity = '0';
+        setTimeout(() => {
+          loadingScreen.style.display = 'none';
+          if (loadingScreen.parentNode) {
+            loadingScreen.parentNode.removeChild(loadingScreen);
+          }
+        }, 350);
+      }
+
+      // Immediately wire click, pointerup, and touchend
+      ['click', 'pointerup', 'touchend'].forEach((evt) => {
+        loadingStartBtn.addEventListener(evt, dismissLoadingScreen, { passive: false });
+        loadingScreen.addEventListener(evt, (e) => {
+          dismissLoadingScreen(e);
+        }, { passive: false });
+      });
+
+      setTimeout(advanceLoading, 120);
+
+      animate();
+    </script>
+  </body>
+</html>

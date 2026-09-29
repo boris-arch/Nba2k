@@ -1,0 +1,6 @@
+{
+  "name": "3D Mobile Basketball",
+  "description": "Realistic 3D mobile web basketball shooting game powered by Three.js and Cannon-es physics with intuitive touch swipe controls.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
