@@ -1,1 +1,19 @@
 @import "tailwindcss";
+
+/* Keep the WebGL surface aligned with the full-screen game container. */
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+canvas {
+  display: block;
+  max-width: 100%;
+}
+
+button {
+  font: inherit;
+}
