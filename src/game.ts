@@ -210,6 +210,10 @@ export class BasketballGame {
   private houPlayType: 'PICK_AND_ROLL' | 'ISOLATION' | 'DRIVE_AND_KICK' | 'MOTION' = 'PICK_AND_ROLL';
   private houPlayTimer = 0;
   private houScreener: PlayerMesh | null = null;
+  private houDribbleMove: 'NONE' | 'CROSSOVER' | 'STEP_BACK' = 'NONE';
+  private houMoveTimer = 0;
+  private houPumpFakeTimer = 0;
+  private houDoubleTeamTimer = 0;
   private gswCutTimer = 0;
   private gswScreenTimer = 0;
   private gswScreenActive = false;
@@ -2321,9 +2325,9 @@ export class BasketballGame {
   }
 
   public triggerRebound() {
-    if (this.controlledPlayer.isDefendingAnim) return;
-    this.controlledPlayer.isDefendingAnim = true;
-    this.controlledPlayer.defendAnimTimer = 0;
+    if (this.controlledPlayer.isReboundingAnim || this.controlledPlayer.isDefendingAnim) return;
+    this.controlledPlayer.isReboundingAnim = true;
+    this.controlledPlayer.reboundAnimTimer = 0;
   }
 
   public releaseShooting() {
@@ -2471,6 +2475,9 @@ export class BasketballGame {
         // Clean Block
         sounds.playBlock();
         this.spawnFloatingStatus('BLOCKED BY CURRY!', this.controlledPlayer.position, '#00e5ff');
+        this.controlledPlayer.isCelebrationAnim = true;
+        this.controlledPlayer.celebrationAnimTimer = 0;
+        this.controlledPlayer.celebrationType = 'FINGER_WAG';
         this.ballState = 'REBOUND';
         this.activeShot = null;
         this.ballVel.set((Math.random() - 0.5) * 4, 1.8, 4.0);
@@ -2495,9 +2502,9 @@ export class BasketballGame {
     const houCarrier = this.ballHolder && this.ballHolder.data.team === 'HOU' ? this.ballHolder : null;
     if (!houCarrier) return;
 
-    // Lunge arm animation
-    this.controlledPlayer.rightArmPivot.rotation.x = -1.5;
-    this.controlledPlayer.rightArmPivot.rotation.z = 0.4;
+    // Active poke check / steal animation
+    this.controlledPlayer.isStealAnim = true;
+    this.controlledPlayer.stealAnimTimer = 0;
 
     const dist = this.controlledPlayer.position.distanceTo(houCarrier.position);
     if (dist < 1.4 && this.ballState === 'DRIBBLE') {
@@ -2526,6 +2533,13 @@ export class BasketballGame {
       p.isShootingAnim = false;
       p.isDefendingAnim = false;
       p.isDunking = false;
+      p.isLayupAnim = false;
+      p.isPassingAnim = false;
+      p.isStealAnim = false;
+      p.isReboundingAnim = false;
+      p.isCatchAnim = false;
+      p.isScreenAnim = false;
+      p.isCelebrationAnim = false;
       p.position.y = 0;
       p.torsoMesh.rotation.set(0, 0, 0);
       p.torsoMesh.scale.set(1, 1, 1);
@@ -2537,6 +2551,7 @@ export class BasketballGame {
       p.rightLegPivot.rotation.set(0, 0, 0);
       p.leftKneePivot.rotation.set(0, 0, 0);
       p.rightKneePivot.rotation.set(0, 0, 0);
+      p.leftHandMesh.rotation.set(0, 0, 0);
       p.rightHandMesh.rotation.set(0, 0, 0);
     });
   }
@@ -3580,12 +3595,17 @@ export class BasketballGame {
     const isThree = distToHoop > 6.75;
     const points = isThree ? 3 : 2;
 
-    // Check if close enough for SLAM DUNK!
-    const isDunk = distToHoop <= 3.6 && !isThree;
+    // Check if close enough for SLAM DUNK or DRIVING LAYUP!
+    const isClose = distToHoop <= 3.8 && !isThree;
+    const isDunk = isClose && (shooter.data.position === 'C' || shooter.data.position === 'PF' || shooter.data.speed > 4.5 || Math.random() < 0.5);
+    const isLayup = isClose && !isDunk;
 
     if (isDunk) {
       shooter.isDunking = true;
       shooter.dunkAnimTimer = 0;
+    } else if (isLayup) {
+      shooter.isLayupAnim = true;
+      shooter.layupAnimTimer = 0;
     } else {
       shooter.isShootingAnim = true;
       shooter.shootAnimTimer = 0;
@@ -3613,6 +3633,9 @@ export class BasketballGame {
     if (isDunk) {
       willMake = true;
       quality = 'SLAM DUNK!';
+    } else if (isLayup) {
+      willMake = isContested ? Math.random() < 0.72 : Math.random() < 0.92;
+      quality = 'DRIVING LAYUP';
     } else if (isGreen) {
       willMake = true;
       quality = 'GREEN RELEASE! PERFECT';
@@ -3699,7 +3722,7 @@ export class BasketballGame {
     this.ballPrevPos.copy(this.ballPos);
     this.ball.position.copy(this.ballPos);
 
-    const flightDuration = isDunk ? 0.38 : THREE.MathUtils.clamp(0.88 + distToHoop * 0.035, 0.95, 1.18);
+    const flightDuration = isDunk ? 0.38 : (isLayup ? 0.58 : THREE.MathUtils.clamp(0.88 + distToHoop * 0.035, 0.95, 1.18));
     this.ballVel.x = (targetPoint.x - this.ballPos.x) / flightDuration;
     this.ballVel.z = (targetPoint.z - this.ballPos.z) / flightDuration;
     const deltaY = targetPoint.y - this.ballPos.y;
@@ -3795,6 +3818,8 @@ export class BasketballGame {
     this.activeShot = null;
 
     // Visual chest pass follow-through on the passer
+    passer.isPassingAnim = true;
+    passer.passAnimTimer = 0;
     passer.rightArmPivot.rotation.x = -1.45;
     passer.leftArmPivot.rotation.x = -1.45;
     passer.rightElbowPivot.rotation.x = -0.2;
@@ -3969,10 +3994,32 @@ export class BasketballGame {
         this.ballVel.z = THREE.MathUtils.lerp(this.ballVel.z, toChest.z * 4.5, dt * 6.5);
       }
 
+      // Smart NBA Passing Lane Deflection: Alert defenders lurking in the direct passing lane can tip careless passes
+      const oppTeam = receiver.data.team === 'GSW' ? 'HOU' : 'GSW';
+      const laneDefenders = this.players.filter(p => p.data.team === oppTeam);
+      for (const d of laneDefenders) {
+        const distDToBall = d.position.distanceTo(this.ballPos);
+        if (distDToBall < 0.72 && this.ballPos.y < 2.2 && Math.random() < 0.16) {
+          sounds.playBlock();
+          sounds.playSneakerSqueak();
+          d.isStealAnim = true;
+          d.stealAnimTimer = 0;
+          this.ballHolder = null;
+          this.ballState = 'REBOUND';
+          this.passTargetPlayer = null;
+          this.lastBallTouchedTeam = d.data.team;
+          this.ballVel.set((Math.random() - 0.5) * 4.2, 1.7, (Math.random() - 0.5) * 4.2);
+          this.spawnFloatingStatus(`TIPPED BY ${d.data.name}!`, d.position, '#ce1141');
+          return;
+        }
+      }
+
       // Realistic catch window (1.85m wingspan reach)
       if (distXZ < 1.85 && this.ballPos.y < 2.5) {
         this.ballHolder = receiver;
         this.ballState = 'DRIBBLE';
+        receiver.isCatchAnim = true;
+        receiver.catchAnimTimer = 0;
         this.passTargetPlayer = null;
         this.floorBounceCount = 0;
         this.isBallRolling = false;
@@ -4189,6 +4236,22 @@ export class BasketballGame {
           sounds.playSwish();
         }
         sounds.playCrowdCheer();
+
+        // Trigger celebratory animation on the scorer
+        const scorer = this.activeShot?.shooter;
+        if (scorer && !scorer.isCelebrationAnim) {
+          scorer.isCelebrationAnim = true;
+          scorer.celebrationAnimTimer = 0;
+          if (isDunk) {
+            scorer.celebrationType = 'DUNK_FLEX';
+          } else if (points === 3 && (scorer.data.name.includes('CURRY') || scorer.data.name.includes('THOMPSON'))) {
+            scorer.celebrationType = isGreen ? 'NIGHT_NIGHT' : 'SHIMMY';
+          } else if (isGreen) {
+            scorer.celebrationType = 'SHIMMY';
+          } else {
+            scorer.celebrationType = 'DUNK_FLEX';
+          }
+        }
 
         this.spawnFloatingScore(points, h.pos);
         if (isGreen) {
@@ -5015,11 +5078,11 @@ export class BasketballGame {
             if (toScreen.length() > 0.25) {
               toScreen.normalize();
               center.position.addScaledVector(toScreen, center.data.speed * 1.15 * dt);
+              center.isScreenAnim = false;
+            } else {
+              center.isScreenAnim = true;
             }
             center.lookAt(defender.position.x, center.position.y, defender.position.z);
-            // Screening stance
-            center.leftArmPivot.rotation.x = -0.3;
-            center.rightArmPivot.rotation.x = -0.3;
           }
 
           // Carrier rubs defender off the screen
@@ -5028,6 +5091,7 @@ export class BasketballGame {
           carrier.lookAt(targetRim.x, carrier.position.y, targetRim.z);
           carrier.dribbleHand = Math.sin(this.gameClock * 6) > 0 ? 'left' : 'right';
         } else {
+          center.isScreenAnim = false;
           // Phase 2: Screener rolls hard to the basket for a dunk/layup!
           const rollSpot = new THREE.Vector3(0, 0, 11.2);
           const toRoll = new THREE.Vector3().subVectors(rollSpot, center.position);
@@ -5084,20 +5148,61 @@ export class BasketballGame {
       });
 
       // -----------------------------------------------------------------------
-      // CARRIER DRIVING & CROSSOVER FOOTWORK
+      // SMART NBA CARRIER DRIVING, CROSSOVERS & STEP-BACKS
       // -----------------------------------------------------------------------
+      this.houMoveTimer += dt;
+      if (this.houPumpFakeTimer > 0) this.houPumpFakeTimer -= dt;
+      if (this.houDoubleTeamTimer > 0) this.houDoubleTeamTimer -= dt;
+
+      // Smart Crossover / Step-back decision when on-ball defender is pressing tight
+      if (defDist < 1.35 && this.houMoveTimer > 1.8 && this.houDribbleMove === 'NONE') {
+        this.houMoveTimer = 0;
+        const roll = Math.random();
+        if (roll < 0.45) {
+          this.houDribbleMove = 'CROSSOVER';
+          carrier.dribbleHand = carrier.dribbleHand === 'left' ? 'right' : 'left';
+          sounds.playSneakerSqueak();
+          this.spawnFloatingStatus('CROSSOVER!', carrier.position, '#ce1141');
+        } else if (roll < 0.72 && distToRim > 6.2 && distToRim < 8.5) {
+          this.houDribbleMove = 'STEP_BACK';
+          sounds.playSneakerSqueak();
+          this.spawnFloatingStatus('STEP-BACK!', carrier.position, '#ce1141');
+        }
+      }
+
       if (this.houPlayType !== 'PICK_AND_ROLL' || this.houPlayTimer >= 3.2) {
         if (distToRim > 1.2) {
           toRim.normalize();
-          carrier.dribbleHand = Math.sin(this.gameClock * 6.5) > 0 ? 'left' : 'right';
-          const driveSpeedMult = defDist < 1.3 ? 1.05 : 1.28;
-          carrier.position.addScaledVector(toRim, carrier.data.speed * driveSpeedMult * dt);
+          const driveVector = toRim.clone();
+
+          if (this.houDribbleMove === 'CROSSOVER') {
+            // Cut sharply laterally across the defender's hips
+            const sideDir = new THREE.Vector3(-toRim.z, 0, toRim.x).normalize();
+            const sideSign = carrier.dribbleHand === 'right' ? 1 : -1;
+            driveVector.addScaledVector(sideDir, sideSign * 0.95).normalize();
+
+            if (this.houMoveTimer > 0.52) {
+              this.houDribbleMove = 'NONE';
+            }
+          } else if (this.houDribbleMove === 'STEP_BACK') {
+            // Rapid separation hop backward behind 3-pt line
+            driveVector.negate().multiplyScalar(1.25);
+            if (this.houMoveTimer > 0.42) {
+              this.houDribbleMove = 'NONE';
+              this.houCarrierDribbleTime = 0;
+              this.executeShot(carrier, 0.65);
+              return;
+            }
+          }
+
+          const driveSpeedMult = this.houDribbleMove !== 'NONE' ? 1.42 : (defDist < 1.3 ? 1.05 : 1.28);
+          carrier.position.addScaledVector(driveVector, carrier.data.speed * driveSpeedMult * dt);
           carrier.lookAt(targetRim.x, carrier.position.y, targetRim.z);
         }
       }
 
       // -----------------------------------------------------------------------
-      // HIGH-IQ SHOT DECISIONS
+      // HIGH-IQ SHOT DECISIONS & PUMP FAKE BAITING
       // -----------------------------------------------------------------------
       // 1. RIM FINISH: High-percentage Dunk / Layup within 3.6m
       if (distToRim <= 3.6 && this.ballState === 'DRIBBLE') {
@@ -5107,11 +5212,21 @@ export class BasketballGame {
         return;
       }
 
-      // 2. OPEN 3-POINTER / RHYTHM PULL-UP JUMPER
-      // If defender is sagging > 1.6m away and carrier is near 3-pt line (distToRim 6.4m - 8.2m)
-      const isPerimeterOpen = defDist > 1.6 && distToRim >= 6.2 && distToRim <= 8.2 && this.houCarrierDribbleTime > 0.6;
-      const isMidRangeOpen = defDist > 1.8 && distToRim >= 4.0 && distToRim < 6.2;
-      const clockExpiring = this.shotClock <= 3.5;
+      // 2. PUMP FAKE BAITING: If defender is jumping to contest/block, pump fake and blow by!
+      const isDefLeaping = defender && (defender.isDefendingAnim || defender.position.y > 0.15);
+      if (isDefLeaping && defDist < 1.8 && this.houPumpFakeTimer <= 0 && this.ballState === 'DRIBBLE') {
+        this.houPumpFakeTimer = 1.2;
+        sounds.playSneakerSqueak();
+        this.spawnFloatingStatus('PUMP FAKE!', carrier.position, '#ffd700');
+        // Step through and attack the rim while defender is in mid-air!
+        carrier.position.addScaledVector(toRim, carrier.data.speed * 1.35 * dt);
+        return;
+      }
+
+      // 3. OPEN 3-POINTER / RHYTHM PULL-UP JUMPER / LATE CLOCK URGENCY
+      const isPerimeterOpen = defDist > 1.55 && distToRim >= 6.2 && distToRim <= 8.4 && this.houCarrierDribbleTime > 0.5;
+      const isMidRangeOpen = defDist > 1.75 && distToRim >= 3.8 && distToRim < 6.2;
+      const clockExpiring = this.shotClock <= 4.0; // Urgency before shot clock expires!
 
       if ((isPerimeterOpen || isMidRangeOpen || clockExpiring) && this.ballState === 'DRIBBLE') {
         this.houCarrierDribbleTime = 0;
@@ -5328,8 +5443,32 @@ export class BasketballGame {
         }
 
         // -------------------------------------------------------------------
-        // ROLE 3: OFF-BALL HELP & DENIAL (BALL-YOU-MAN TRIANGLE)
+        // ROLE 3: OFF-BALL HELP, TRAPS & DENIAL (BALL-YOU-MAN TRIANGLE)
         // -------------------------------------------------------------------
+        // DOUBLE TEAM TRAP: If user penetrates into the paint or holds ball in prolonged isolation
+        const shouldDouble = (distCarrierToHoop < 5.0 || this.controlledPlayer.idleTimer > 2.5) && !this.isInboundPlay;
+        const isDoubleTeamer = shouldDouble && !isPrimaryDefender && p.position.distanceTo(gswCarrier.position) < 3.2;
+
+        if (isDoubleTeamer) {
+          const toCarrier = new THREE.Vector3().subVectors(gswCarrier.position, p.position);
+          toCarrier.y = 0;
+          if (toCarrier.length() > 0.8) {
+            toCarrier.normalize();
+            p.position.addScaledVector(toCarrier, p.data.speed * 1.15 * dt);
+          }
+          p.lookAt(gswCarrier.position.x, p.position.y, gswCarrier.position.z);
+          p.leftArmPivot.rotation.x = -1.5;
+          p.rightArmPivot.rotation.x = -1.5;
+          p.leftArmPivot.rotation.z = -0.3;
+          p.rightArmPivot.rotation.z = 0.3;
+
+          if (this.houDoubleTeamTimer <= 0) {
+            this.houDoubleTeamTimer = 3.5;
+            this.spawnFloatingStatus('DOUBLE TEAM TRAP!', gswCarrier.position, '#ce1141');
+          }
+          return;
+        }
+
         const myMatchup = gswPlayers.find(opp => opp.data.position === p.data.position) || gswPlayers[0];
         const matchupToBall = myMatchup.position.distanceTo(gswCarrier.position);
         const isWeakside = (myMatchup.position.x * gswCarrier.position.x < 0) || matchupToBall > 6.5;
@@ -5636,10 +5775,11 @@ export class BasketballGame {
           if (toScreen.length() > 0.25) {
             toScreen.normalize();
             p.position.addScaledVector(toScreen, p.data.speed * 1.05 * dt);
+            p.isScreenAnim = false;
+          } else {
+            p.isScreenAnim = true;
           }
           p.lookAt(screenSpot.x, p.position.y, screenSpot.z);
-          p.leftArmPivot.rotation.x = -0.3;
-          p.rightArmPivot.rotation.x = -0.3;
           return;
         }
 
@@ -5676,11 +5816,13 @@ export class BasketballGame {
             if (toScreen.length() > 0.25) {
               toScreen.normalize();
               p.position.addScaledVector(toScreen, p.data.speed * 1.1 * dt);
+              p.isScreenAnim = false;
+            } else {
+              p.isScreenAnim = true;
             }
             p.lookAt(userDefender.position.x, p.position.y, userDefender.position.z);
-            p.leftArmPivot.rotation.x = -0.35;
-            p.rightArmPivot.rotation.x = -0.35;
           } else {
+            p.isScreenAnim = false;
             // Phase 2: Roll hard to the rim or Pop out to the 3-point line!
             const shouldPop = p.data.position === 'PF'; // Draymond pops, Looney rolls
             const target = shouldPop ? new THREE.Vector3(0, 0, -6.8) : new THREE.Vector3(1.2, 0, -11.2);
@@ -5723,15 +5865,26 @@ export class BasketballGame {
           return;
         }
 
-        // E. 5-OUT DYNAMIC PERIMETER MOTION & PASSING LANE RELOCATION
+        // E. 5-OUT DYNAMIC PERIMETER MOTION, DRIFT-AND-FILL & PASS RELOCATION
         const baseSpot = offBallSpots[p.data.position] || new THREE.Vector3(-4.5, 0, -8.0);
         const dynamicSway = Math.sin(this.gameClock * 2.2 + p.position.x) * 0.42;
         const targetSpot = new THREE.Vector3(baseSpot.x + dynamicSway, 0, baseSpot.z);
 
-        // If user drives toward this spot, flare away along the 3-point line to preserve spacing!
-        const userDistToSpot = targetSpot.distanceTo(user.position);
-        if (userDistToSpot < 2.8) {
-          targetSpot.x = targetSpot.x > 0 ? targetSpot.x + 1.4 : targetSpot.x - 1.4;
+        // NBA "Drift and Fill": If user drives deep into the paint, perimeter shooters drift to corner pockets
+        if (user.position.z < -6.8) {
+          if (p.data.position === 'SG') {
+            targetSpot.set(-6.1, 0, -11.2); // Left corner 3
+          } else if (p.data.position === 'SF') {
+            targetSpot.set(6.1, 0, -11.2);  // Right corner 3
+          } else if (p.data.position === 'PF') {
+            targetSpot.set(0.0, 0, -6.6);   // Top of key safety valve
+          }
+        } else {
+          // Flare away along the 3-point line to preserve spacing if user approaches
+          const userDistToSpot = targetSpot.distanceTo(user.position);
+          if (userDistToSpot < 2.8) {
+            targetSpot.x = targetSpot.x > 0 ? targetSpot.x + 1.4 : targetSpot.x - 1.4;
+          }
         }
 
         const toSpot = new THREE.Vector3().subVectors(targetSpot, p.position);
@@ -5742,6 +5895,14 @@ export class BasketballGame {
         }
         // Always face the ball carrier ready for catch-and-shoot!
         p.lookAt(user.position.x, p.position.y, user.position.z);
+
+        // Smart Calling for Ball: When wide open outside the arc, raise hands calling for pass!
+        const oppDef = this.getNearestDefender(p);
+        const oppDist = oppDef ? oppDef.position.distanceTo(p.position) : 99;
+        if (oppDist > 2.2 && p.data.threePointRating >= 80 && !p.isPassingAnim && !p.isShootingAnim) {
+          p.leftArmPivot.rotation.x = -1.45;
+          p.rightArmPivot.rotation.x = -1.45;
+        }
       });
     }
 
@@ -6146,7 +6307,314 @@ export class BasketballGame {
         return;
       }
 
-      // 4. BIOMECHANICALLY ACCURATE RUNNING & SPRINTING STRIDES
+      // 4. DRIVING LAYUP / FINGER-ROLL ANIMATION
+      if (p.isLayupAnim) {
+        p.layupAnimTimer = (p.layupAnimTimer || 0) + dt;
+        const layupProg = Math.min(1.0, p.layupAnimTimer / 0.72);
+
+        if (layupProg < 0.45) {
+          // Elevation on single lead foot
+          const liftNorm = layupProg / 0.45;
+          p.position.y = Math.sin(liftNorm * Math.PI * 0.5) * 0.72;
+          p.torsoMesh.rotation.x = -0.15;
+          p.torsoMesh.rotation.z = 0.12;
+
+          // Lead knee drives high (classic layup form)
+          p.rightLegPivot.rotation.x = -0.95 * liftNorm;
+          p.rightKneePivot.rotation.x = 1.45 * liftNorm;
+          p.leftLegPivot.rotation.x = 0.25;
+
+          // Underhand scoop arm elevation
+          p.rightArmPivot.rotation.x = -2.35 * liftNorm;
+          p.rightArmPivot.rotation.z = 0.15;
+          p.rightElbowPivot.rotation.x = -0.35;
+          p.rightHandMesh.rotation.x = -0.55 * liftNorm; // Open palm facing up
+
+          // Off-arm shield
+          p.leftArmPivot.rotation.x = -0.95;
+          p.leftElbowPivot.rotation.x = -1.25;
+        } else if (layupProg < 0.75) {
+          // Soft finger roll release off the backboard
+          const releaseNorm = (layupProg - 0.45) / 0.30;
+          p.position.y = 0.72 * (1 - releaseNorm * 0.5);
+          p.rightArmPivot.rotation.x = -2.65;
+          p.rightHandMesh.rotation.x = 0.45 * releaseNorm; // Finger roll flick
+        } else {
+          // Landing absorption
+          const landNorm = (layupProg - 0.75) / 0.25;
+          p.position.y = Math.max(0, 0.36 * (1 - landNorm));
+          const landBend = Math.sin(landNorm * Math.PI) * 0.55;
+          p.leftKneePivot.rotation.x = landBend;
+          p.rightKneePivot.rotation.x = landBend;
+          p.leftLegPivot.rotation.x = landBend * 0.3;
+          p.rightLegPivot.rotation.x = landBend * 0.3;
+        }
+
+        if (layupProg >= 1.0) {
+          p.isLayupAnim = false;
+          p.layupAnimTimer = 0;
+          p.position.y = 0;
+          p.leftKneePivot.rotation.x = 0;
+          p.rightKneePivot.rotation.x = 0;
+          p.leftLegPivot.rotation.x = 0;
+          p.rightLegPivot.rotation.x = 0;
+          p.rightArmPivot.rotation.set(0, 0, 0);
+          p.leftArmPivot.rotation.set(0, 0, 0);
+          p.rightElbowPivot.rotation.x = 0;
+          p.leftElbowPivot.rotation.x = 0;
+          p.rightHandMesh.rotation.x = 0;
+          p.torsoMesh.rotation.set(0, 0, 0);
+        }
+        return;
+      }
+
+      // 5. PASSING ANIMATION (Step forward, two-hand chest push, outward wrist snap)
+      if (p.isPassingAnim) {
+        p.passAnimTimer = (p.passAnimTimer || 0) + dt;
+        const passProg = Math.min(1.0, p.passAnimTimer / 0.42);
+
+        if (passProg < 0.35) {
+          // Windup / gather to chest
+          const gatherNorm = passProg / 0.35;
+          p.leftArmPivot.rotation.x = -0.85 * gatherNorm;
+          p.rightArmPivot.rotation.x = -0.85 * gatherNorm;
+          p.leftElbowPivot.rotation.x = -1.6 * gatherNorm;
+          p.rightElbowPivot.rotation.x = -1.6 * gatherNorm;
+          p.torsoMesh.rotation.x = 0.12 * gatherNorm;
+          // Step forward with lead foot
+          p.leftLegPivot.rotation.x = 0.42 * gatherNorm;
+          p.rightLegPivot.rotation.x = -0.25 * gatherNorm;
+        } else if (passProg < 0.75) {
+          // Explosive push forward and wrist flick
+          p.leftArmPivot.rotation.x = -1.65;
+          p.rightArmPivot.rotation.x = -1.65;
+          p.leftElbowPivot.rotation.x = -0.15;
+          p.rightElbowPivot.rotation.x = -0.15;
+          p.leftHandMesh.rotation.x = 0.65;
+          p.rightHandMesh.rotation.x = 0.65;
+          p.torsoMesh.rotation.x = 0.22;
+        } else {
+          // Recovery back to normal stance
+          const recoverNorm = (passProg - 0.75) / 0.25;
+          p.leftArmPivot.rotation.x = -1.65 * (1 - recoverNorm);
+          p.rightArmPivot.rotation.x = -1.65 * (1 - recoverNorm);
+          p.leftHandMesh.rotation.x = 0.65 * (1 - recoverNorm);
+          p.rightHandMesh.rotation.x = 0.65 * (1 - recoverNorm);
+          p.torsoMesh.rotation.x = 0.22 * (1 - recoverNorm);
+          p.leftLegPivot.rotation.x = 0.42 * (1 - recoverNorm);
+          p.rightLegPivot.rotation.x = -0.25 * (1 - recoverNorm);
+        }
+
+        if (passProg >= 1.0) {
+          p.isPassingAnim = false;
+          p.passAnimTimer = 0;
+          p.leftHandMesh.rotation.x = 0;
+          p.rightHandMesh.rotation.x = 0;
+          p.leftArmPivot.rotation.set(0, 0, 0);
+          p.rightArmPivot.rotation.set(0, 0, 0);
+          p.leftElbowPivot.rotation.x = 0;
+          p.rightElbowPivot.rotation.x = 0;
+          p.torsoMesh.rotation.x = 0;
+        }
+        return;
+      }
+
+      // 6. PASS CATCH & RECEPTION ANIMATION
+      if (p.isCatchAnim) {
+        p.catchAnimTimer = (p.catchAnimTimer || 0) + dt;
+        const catchProg = Math.min(1.0, p.catchAnimTimer / 0.28);
+        const cushion = Math.sin(catchProg * Math.PI);
+
+        // Clamping hands onto ball, slight knee cushion absorption
+        p.leftArmPivot.rotation.x = -0.85 - cushion * 0.35;
+        p.rightArmPivot.rotation.x = -0.85 - cushion * 0.35;
+        p.leftElbowPivot.rotation.x = -1.45;
+        p.rightElbowPivot.rotation.x = -1.45;
+        p.leftKneePivot.rotation.x = cushion * 0.35;
+        p.rightKneePivot.rotation.x = cushion * 0.35;
+
+        if (catchProg >= 1.0) {
+          p.isCatchAnim = false;
+          p.catchAnimTimer = 0;
+          p.leftKneePivot.rotation.x = 0;
+          p.rightKneePivot.rotation.x = 0;
+        }
+        return;
+      }
+
+      // 7. STEAL / POKE CHECK ANIMATION
+      if (p.isStealAnim) {
+        p.stealAnimTimer = (p.stealAnimTimer || 0) + dt;
+        const stealProg = Math.min(1.0, p.stealAnimTimer / 0.40);
+
+        if (stealProg < 0.45) {
+          // Fast lunge & arm swipe forward toward the ball
+          const lungeNorm = stealProg / 0.45;
+          p.torsoMesh.rotation.x = 0.38 * lungeNorm;
+          p.torsoMesh.rotation.y = 0.22 * lungeNorm;
+          p.rightArmPivot.rotation.x = -1.75 * lungeNorm;
+          p.rightArmPivot.rotation.z = 0.45 * lungeNorm;
+          p.rightElbowPivot.rotation.x = -0.25;
+          p.leftArmPivot.rotation.x = 0.45 * lungeNorm;
+          p.leftArmPivot.rotation.z = -0.35 * lungeNorm;
+          p.leftLegPivot.rotation.x = -0.45 * lungeNorm;
+          p.leftKneePivot.rotation.x = 0.85 * lungeNorm;
+          p.rightLegPivot.rotation.x = 0.55 * lungeNorm;
+        } else {
+          // Smooth recovery back to defensive stance
+          const recNorm = (stealProg - 0.45) / 0.55;
+          p.torsoMesh.rotation.x = 0.38 * (1 - recNorm);
+          p.torsoMesh.rotation.y = 0.22 * (1 - recNorm);
+          p.rightArmPivot.rotation.x = -1.75 * (1 - recNorm);
+          p.rightArmPivot.rotation.z = 0.45 * (1 - recNorm);
+          p.leftArmPivot.rotation.x = 0.45 * (1 - recNorm);
+          p.leftArmPivot.rotation.z = -0.35 * (1 - recNorm);
+          p.leftLegPivot.rotation.x = -0.45 * (1 - recNorm);
+          p.leftKneePivot.rotation.x = 0.85 * (1 - recNorm);
+          p.rightLegPivot.rotation.x = 0.55 * (1 - recNorm);
+        }
+
+        if (stealProg >= 1.0) {
+          p.isStealAnim = false;
+          p.stealAnimTimer = 0;
+          p.torsoMesh.rotation.set(0, 0, 0);
+          p.rightArmPivot.rotation.set(0, 0, 0);
+          p.leftArmPivot.rotation.set(0, 0, 0);
+          p.leftLegPivot.rotation.x = 0;
+          p.rightLegPivot.rotation.x = 0;
+          p.leftKneePivot.rotation.x = 0;
+        }
+        return;
+      }
+
+      // 8. REBOUND ANIMATION (High two-handed grab above rim, forceful pull-down with flared elbows)
+      if (p.isReboundingAnim) {
+        p.reboundAnimTimer = (p.reboundAnimTimer || 0) + dt;
+        const rebProg = Math.min(1.0, p.reboundAnimTimer / 0.72);
+
+        if (rebProg < 0.42) {
+          // Explosive vertical jump with two hands reaching high for the board
+          const jumpNorm = rebProg / 0.42;
+          p.position.y = Math.sin(jumpNorm * Math.PI * 0.5) * 0.82;
+          p.leftArmPivot.rotation.x = -2.95 * jumpNorm;
+          p.rightArmPivot.rotation.x = -2.95 * jumpNorm;
+          p.leftArmPivot.rotation.z = 0.28 * jumpNorm;
+          p.rightArmPivot.rotation.z = -0.28 * jumpNorm;
+          p.leftElbowPivot.rotation.x = -0.15;
+          p.rightElbowPivot.rotation.x = -0.15;
+          p.leftLegPivot.rotation.x = 0.22;
+          p.rightLegPivot.rotation.x = 0.22;
+          p.leftKneePivot.rotation.x = 0.45;
+          p.rightKneePivot.rotation.x = 0.45;
+        } else if (rebProg < 0.75) {
+          // Snag ball and pull down into chest with flared elbows (chin the ball)
+          const pullNorm = (rebProg - 0.42) / 0.33;
+          p.position.y = 0.82 * (1 - pullNorm * 0.7);
+          p.leftArmPivot.rotation.x = THREE.MathUtils.lerp(-2.95, -0.75, pullNorm);
+          p.rightArmPivot.rotation.x = THREE.MathUtils.lerp(-2.95, -0.75, pullNorm);
+          p.leftArmPivot.rotation.z = THREE.MathUtils.lerp(0.28, 0.55, pullNorm);
+          p.rightArmPivot.rotation.z = THREE.MathUtils.lerp(-0.28, -0.55, pullNorm);
+          p.leftElbowPivot.rotation.x = -1.75;
+          p.rightElbowPivot.rotation.x = -1.75;
+          p.torsoMesh.rotation.x = 0.25;
+        } else {
+          // Landing cushioning with deep knee bend
+          const landNorm = (rebProg - 0.75) / 0.25;
+          p.position.y = Math.max(0, 0.25 * (1 - landNorm));
+          const kneeBend = Math.sin(landNorm * Math.PI) * 0.65;
+          p.leftKneePivot.rotation.x = kneeBend;
+          p.rightKneePivot.rotation.x = kneeBend;
+          p.leftLegPivot.rotation.x = kneeBend * 0.3;
+          p.rightLegPivot.rotation.x = kneeBend * 0.3;
+        }
+
+        if (rebProg >= 1.0) {
+          p.isReboundingAnim = false;
+          p.reboundAnimTimer = 0;
+          p.position.y = 0;
+          p.leftArmPivot.rotation.set(0, 0, 0);
+          p.rightArmPivot.rotation.set(0, 0, 0);
+          p.leftElbowPivot.rotation.set(0, 0, 0);
+          p.rightElbowPivot.rotation.set(0, 0, 0);
+          p.leftKneePivot.rotation.x = 0;
+          p.rightKneePivot.rotation.x = 0;
+          p.torsoMesh.rotation.set(0, 0, 0);
+        }
+        return;
+      }
+
+      // 9. BRICK WALL SCREEN ANIMATION (Wide sturdy base, knees bent, arms folded across chest)
+      if (p.isScreenAnim) {
+        p.screenAnimTimer = (p.screenAnimTimer || 0) + dt;
+        p.leftLegPivot.rotation.x = 0.15;
+        p.rightLegPivot.rotation.x = 0.15;
+        p.leftLegPivot.rotation.z = 0.25;
+        p.rightLegPivot.rotation.z = -0.25;
+        p.leftKneePivot.rotation.x = 0.45;
+        p.rightKneePivot.rotation.x = 0.45;
+        p.leftArmPivot.rotation.x = -0.65;
+        p.rightArmPivot.rotation.x = -0.65;
+        p.leftArmPivot.rotation.z = -0.35;
+        p.rightArmPivot.rotation.z = 0.35;
+        p.leftElbowPivot.rotation.x = -1.75;
+        p.rightElbowPivot.rotation.x = -1.75;
+        p.torsoMesh.rotation.x = 0.12;
+        return;
+      }
+
+      // 10. CELEBRATION ANIMATIONS (Night-Night, Shimmy, Dunk Flex, Mutombo Finger Wag)
+      if (p.isCelebrationAnim) {
+        p.celebrationAnimTimer = (p.celebrationAnimTimer || 0) + dt;
+        const celProg = Math.min(1.0, p.celebrationAnimTimer / 1.6);
+
+        if (p.celebrationType === 'NIGHT_NIGHT') {
+          // Signature Curry Night Night: Hands folded together under tilted head, sleeping gesture
+          p.torsoMesh.rotation.z = 0.32;
+          p.headMesh.rotation.z = 0.42;
+          p.rightArmPivot.rotation.x = -1.45;
+          p.rightArmPivot.rotation.z = 0.55;
+          p.leftArmPivot.rotation.x = -1.45;
+          p.leftArmPivot.rotation.z = 0.35;
+          p.rightElbowPivot.rotation.x = -1.75;
+          p.leftElbowPivot.rotation.x = -1.75;
+        } else if (p.celebrationType === 'SHIMMY') {
+          // Shoulder shimmy shake
+          const shimmy = Math.sin(p.celebrationAnimTimer * 16.0) * 0.32;
+          p.torsoMesh.rotation.y = shimmy;
+          p.leftArmPivot.rotation.x = -0.6 + shimmy * 0.4;
+          p.rightArmPivot.rotation.x = -0.6 - shimmy * 0.4;
+        } else if (p.celebrationType === 'DUNK_FLEX') {
+          // Power flex: bicep curls, puffed chest, head roar
+          p.torsoMesh.rotation.x = -0.15;
+          p.rightArmPivot.rotation.x = -0.85;
+          p.rightArmPivot.rotation.z = 0.95;
+          p.leftArmPivot.rotation.x = -0.85;
+          p.leftArmPivot.rotation.z = -0.95;
+          p.rightElbowPivot.rotation.x = -2.1;
+          p.leftElbowPivot.rotation.x = -2.1;
+        } else if (p.celebrationType === 'FINGER_WAG') {
+          // Mutombo index finger wag
+          const wag = Math.sin(p.celebrationAnimTimer * 14.0) * 0.45;
+          p.rightArmPivot.rotation.x = -1.75;
+          p.rightArmPivot.rotation.z = wag;
+          p.rightElbowPivot.rotation.x = -0.3;
+          p.leftArmPivot.rotation.x = -0.3;
+        }
+
+        if (celProg >= 1.0) {
+          p.isCelebrationAnim = false;
+          p.celebrationAnimTimer = 0;
+          p.torsoMesh.rotation.set(0, 0, 0);
+          p.headMesh.rotation.set(0, 0, 0);
+          p.rightArmPivot.rotation.set(0, 0, 0);
+          p.leftArmPivot.rotation.set(0, 0, 0);
+          p.rightElbowPivot.rotation.set(0, 0, 0);
+          p.leftElbowPivot.rotation.set(0, 0, 0);
+        }
+        return;
+      }
+
+      // 11. BIOMECHANICALLY ACCURATE RUNNING & SPRINTING STRIDES
       p.position.x = THREE.MathUtils.clamp(p.position.x, -7.05, 7.05);
       p.position.z = THREE.MathUtils.clamp(p.position.z, -13.68, 13.68);
 
@@ -6204,7 +6672,20 @@ export class BasketballGame {
         p.torsoMesh.position.y = 1.35 + breath;
         p.headMesh.position.y = 2.0 + breath * 0.8;
 
-        if (hasBall) {
+        if (this.isChargingShot && p === this.controlledPlayer) {
+          // SHOT GATHER & KNEE DIP (Charging up the shot with ball tucked in shooting pocket)
+          const chargeProg = Math.min(1.0, this.shotHoldTime / 0.65);
+          p.position.y = -0.14 * Math.sin(chargeProg * Math.PI * 0.5);
+          p.torsoMesh.rotation.x = 0.16;
+          p.leftLegPivot.rotation.x = 0.28 * chargeProg;
+          p.rightLegPivot.rotation.x = 0.28 * chargeProg;
+          p.leftKneePivot.rotation.x = 0.72 * chargeProg;
+          p.rightKneePivot.rotation.x = 0.72 * chargeProg;
+          p.rightArmPivot.rotation.x = -1.35 * chargeProg;
+          p.rightElbowPivot.rotation.x = -1.65 * chargeProg;
+          p.leftArmPivot.rotation.x = -1.35 * chargeProg;
+          p.leftElbowPivot.rotation.x = -1.55 * chargeProg;
+        } else if (hasBall) {
           // BALL CARRIER IDLE STANCE (Triple-threat athletic crouch)
           p.leftLegPivot.rotation.x = THREE.MathUtils.lerp(p.leftLegPivot.rotation.x, 0.14, dt * 6);
           p.rightLegPivot.rotation.x = THREE.MathUtils.lerp(p.rightLegPivot.rotation.x, 0.16, dt * 6);
@@ -6403,6 +6884,21 @@ interface PlayerMesh extends THREE.Group {
   shootAnimTimer?: number;
   isDunking?: boolean;
   dunkAnimTimer?: number;
+  isLayupAnim?: boolean;
+  layupAnimTimer?: number;
+  isPassingAnim?: boolean;
+  passAnimTimer?: number;
+  isStealAnim?: boolean;
+  stealAnimTimer?: number;
+  isReboundingAnim?: boolean;
+  reboundAnimTimer?: number;
+  isCatchAnim?: boolean;
+  catchAnimTimer?: number;
+  isScreenAnim?: boolean;
+  screenAnimTimer?: number;
+  isCelebrationAnim?: boolean;
+  celebrationAnimTimer?: number;
+  celebrationType?: 'NIGHT_NIGHT' | 'SHIMMY' | 'DUNK_FLEX' | 'FINGER_WAG';
   isDefendingAnim?: boolean;
   defendAnimTimer?: number;
   dribbleHand?: 'left' | 'right';
