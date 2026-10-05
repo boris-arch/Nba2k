@@ -136,6 +136,8 @@ export class BasketballGame {
   private ballState: BallState = 'DRIBBLE';
   private floorBounceCount = 0;
   private isBallRolling = false;
+  private ballSpinAxis = new THREE.Vector3(1, 0, 0);
+  private ballSpinRate = 0;
 
   // Rebound Target Decal
   private reboundMarker!: THREE.Mesh;
@@ -161,10 +163,14 @@ export class BasketballGame {
     shooterTeam: 'GSW' | 'HOU';
     hoopPos: THREE.Vector3;
     backboardZ: number;
+    hasEnteredRim: boolean;
     hasScored: boolean;
     hasHitRim: boolean;
     hasHitFloor: boolean;
     rattlePhase: number;
+    hasTouchedRimSoftly?: boolean;
+    isInAndOut?: boolean;
+    lateralCurve?: number;
   } | null = null;
 
   // Hoops & Nets
@@ -176,8 +182,8 @@ export class BasketballGame {
   private houHoopGroup!: THREE.Group;
   private gswNetMesh!: THREE.Mesh;
   private houNetMesh!: THREE.Mesh;
-  private gswNetWobble = 0;
-  private houNetWobble = 0;
+  private gswNetState!: NetPhysicsState;
+  private houNetState!: NetPhysicsState;
 
   // Teams & Players
   private players: PlayerMesh[] = [];
@@ -195,6 +201,12 @@ export class BasketballGame {
   private cameraTargetPos = new THREE.Vector3(14.8, 7.6, 0);
   private cameraLookTarget = new THREE.Vector3(0, 1.6, 0);
   private cameraCurrentLook = new THREE.Vector3(0, 1.6, 0);
+  private cameraTweenProgress = 1.0;
+  private cameraTweenDuration = 0.85; // 850ms smooth cinematic crane tween
+  private cameraFromPos = new THREE.Vector3();
+  private cameraFromLook = new THREE.Vector3();
+  private wasFreeThrow = false;
+  private predictedBouncePoint = new THREE.Vector3();
 
   // Visual Effects
   private floatingTexts: { sprite: THREE.Sprite; lifetime: number; maxLife: number }[] = [];
@@ -629,33 +641,58 @@ export class BasketballGame {
         this.RIM_RADIUS * 0.58,
         0.48,
         16,
-        3,
+        8,
         true
       );
+      const basePos = Float32Array.from(netGeo.attributes.position.array);
+      netGeo.userData.basePositions = basePos;
+
       const netMat = new THREE.MeshStandardMaterial({
         color: 0xffffff,
         wireframe: true,
-        roughness: 0.8,
+        roughness: 0.75,
         transparent: true,
-        opacity: 0.85,
+        opacity: 0.88,
       });
       const net = new THREE.Mesh(netGeo, netMat);
       net.position.set(0, this.RIM_HEIGHT - 0.24, zPos);
       hoopGroup.add(net);
 
       this.scene.add(hoopGroup);
-      return { group: hoopGroup, net };
+      return { group: hoopGroup, net, basePositions: basePos };
     };
 
     const gswHoop = buildHoop(-13.0, false);
     this.gswHoopGroup = gswHoop.group;
     this.gswNetMesh = gswHoop.net;
+    this.gswNetState = {
+      mesh: gswHoop.net,
+      basePositions: gswHoop.basePositions,
+      reactionTimer: 99,
+      reactionDuration: 1.15,
+      intensity: 0,
+      reactionDir: new THREE.Vector3(0, 0, -1),
+      ballInside: false,
+      ballLocalY: 0,
+      needsReset: false,
+    };
 
     const houHoop = buildHoop(13.0, true);
     this.houHoopGroup = houHoop.group;
     this.houNetMesh = houHoop.net;
+    this.houNetState = {
+      mesh: houHoop.net,
+      basePositions: houHoop.basePositions,
+      reactionTimer: 99,
+      reactionDuration: 1.15,
+      intensity: 0,
+      reactionDir: new THREE.Vector3(0, 0, 1),
+      ballInside: false,
+      ballLocalY: 0,
+      needsReset: false,
+    };
 
-    this.houHoopGroup.visible = false;
+    this.houHoopGroup.visible = true;
     this.gswHoopGroup.visible = true;
   }
 
@@ -712,28 +749,108 @@ export class BasketballGame {
   // BALL CREATION
   // --------------------------------------------------------------------------
   private createBall() {
-    const ballGeo = new THREE.SphereGeometry(this.BALL_RADIUS, 28, 28);
+    const ballGeo = new THREE.SphereGeometry(this.BALL_RADIUS, 32, 32);
     const canvas = document.createElement('canvas');
-    canvas.width = 256;
-    canvas.height = 128;
+    canvas.width = 512;
+    canvas.height = 256;
     const ctx = canvas.getContext('2d')!;
-    ctx.fillStyle = '#df5b12';
-    ctx.fillRect(0, 0, 256, 128);
-    ctx.strokeStyle = '#181818';
-    ctx.lineWidth = 4;
-    ctx.strokeRect(0, 0, 256, 128);
+
+    // 1. Rich Composite Leather Base with radial lighting
+    const gradient = ctx.createLinearGradient(0, 0, 0, 256);
+    gradient.addColorStop(0, '#c75313');
+    gradient.addColorStop(0.5, '#d35c16');
+    gradient.addColorStop(1, '#b8460e');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, 512, 256);
+
+    // 2. Micro-pebble Leather Texture Grain
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.08)';
+    for (let y = 0; y < 256; y += 4) {
+      const shift = (Math.floor(y / 4) % 2) * 2;
+      for (let x = shift; x < 512; x += 4) {
+        ctx.fillRect(x, y, 1.5, 1.5);
+      }
+    }
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.06)';
+    for (let y = 2; y < 256; y += 4) {
+      const shift = ((Math.floor(y / 4) + 1) % 2) * 2;
+      for (let x = shift; x < 512; x += 4) {
+        ctx.fillRect(x, y, 1, 1);
+      }
+    }
+
+    // 3. Iconic 8-Panel Black Inset Seams & Rib Channels
+    ctx.strokeStyle = '#1a1816';
+    ctx.lineWidth = 5;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    // Equator channel
     ctx.beginPath();
-    ctx.moveTo(0, 64);
-    ctx.lineTo(256, 64);
-    ctx.moveTo(128, 0);
-    ctx.lineTo(128, 128);
+    ctx.moveTo(0, 128);
+    ctx.lineTo(512, 128);
     ctx.stroke();
 
+    // Meridian channels
+    ctx.beginPath();
+    ctx.moveTo(128, 0);
+    ctx.lineTo(128, 256);
+    ctx.moveTo(256, 0);
+    ctx.lineTo(256, 256);
+    ctx.moveTo(384, 0);
+    ctx.lineTo(384, 256);
+    ctx.stroke();
+
+    // Symmetrical Arched Rib Curves
+    ctx.beginPath();
+    ctx.moveTo(64, 0);
+    ctx.bezierCurveTo(96, 64, 96, 192, 64, 256);
+    ctx.moveTo(192, 0);
+    ctx.bezierCurveTo(160, 64, 160, 192, 192, 256);
+    ctx.moveTo(320, 0);
+    ctx.bezierCurveTo(352, 64, 352, 192, 320, 256);
+    ctx.moveTo(448, 0);
+    ctx.bezierCurveTo(416, 64, 416, 192, 448, 256);
+    ctx.stroke();
+
+    // Inner shadow for inset channel depth
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.4)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, 130);
+    ctx.lineTo(512, 130);
+    ctx.stroke();
+
+    // 4. Official NBA Game Ball Brand Emblem (Gold & Black)
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#111111';
+    ctx.font = '900 24px Impact, system-ui, sans-serif';
+    ctx.fillText('WILSON', 256, 92);
+    ctx.fillStyle = '#f59e0b';
+    ctx.font = '700 11px system-ui, sans-serif';
+    ctx.fillText('OFFICIAL GAME BALL', 256, 108);
+
+    // Mini NBA Logoman
+    ctx.fillStyle = '#0053bc';
+    ctx.fillRect(244, 60, 11, 20);
+    ctx.fillStyle = '#ce1141';
+    ctx.fillRect(255, 60, 11, 20);
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(249, 66, 3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
     const ballTex = new THREE.CanvasTexture(canvas);
+    ballTex.wrapS = THREE.RepeatWrapping;
+    ballTex.wrapT = THREE.ClampToEdgeWrapping;
+
     const ballMat = new THREE.MeshStandardMaterial({
       map: ballTex,
-      roughness: 0.48,
-      metalness: 0.05,
+      roughness: 0.52,
+      metalness: 0.04,
     });
     this.ball = new THREE.Mesh(ballGeo, ballMat);
     this.ball.castShadow = true;
@@ -1712,6 +1829,8 @@ export class BasketballGame {
     group.idleTimer = Math.random() * 5.0;
     group.dribbleCycle = 0;
     group.crossoverBlend = 1.0;
+    group.velocity = new THREE.Vector3();
+    group.targetVelocity = new THREE.Vector3();
 
     this.scene.add(group as unknown as THREE.Object3D);
     return group;
@@ -2233,6 +2352,9 @@ export class BasketballGame {
     if (e.key === ' ') {
       if (this.ballHolder === this.controlledPlayer && this.ballState === 'DRIBBLE') {
         this.startShooting();
+      } else if (this.ballState === 'REBOUND') {
+        // Space triggers REBOUND JUMP during loose ball / live rebound!
+        this.triggerReboundJump();
       } else if (this.ballHolder?.data.team !== 'GSW') {
         // Space acts as BLOCK on defense!
         this.triggerBlock();
@@ -2496,34 +2618,91 @@ export class BasketballGame {
     }
   }
 
+  // Aerial Rebound Leap Action
+  public triggerReboundJump() {
+    if (!this.controlledPlayer || this.controlledPlayer.isReboundingAnim) return;
+    this.controlledPlayer.isReboundingAnim = true;
+    this.controlledPlayer.reboundAnimTimer = 0;
+    sounds.playSneakerSqueak();
+  }
+
   // Defensive Steal Action
   public triggerSteal() {
     if (this.ballState === 'FREE_THROW') return;
-    const houCarrier = this.ballHolder && this.ballHolder.data.team === 'HOU' ? this.ballHolder : null;
-    if (!houCarrier) return;
 
-    // Active poke check / steal animation
-    this.controlledPlayer.isStealAnim = true;
-    this.controlledPlayer.stealAnimTimer = 0;
+    // 1. Always execute immediate forward lunge swipe animation & sound feedback
+    if (!this.controlledPlayer.isStealAnim) {
+      this.controlledPlayer.isStealAnim = true;
+      this.controlledPlayer.stealAnimTimer = 0;
+      sounds.playSneakerSqueak();
+    }
+
+    // 2. Passing Lane Interception: Steal mid-flight pass
+    if ((this.ballState === 'PASS' || this.ballState === 'BOUNCE_PASS') && this.passTargetPlayer) {
+      const distToBall = this.controlledPlayer.position.distanceTo(this.ballPos);
+      if (distToBall < 1.85 && this.ballPos.y < 2.5) {
+        sounds.playBlock();
+        sounds.playDribble();
+        this.claimBallPossession(this.controlledPlayer);
+        this.spawnFloatingStatus('INTERCEPTED! STEAL!', this.controlledPlayer.position, '#ffd700');
+        this.onPossessionChange?.(true);
+        return;
+      }
+    }
+
+    // 3. On-Ball Pickpocket & Poke Check against Houston Carrier
+    const houCarrier = this.ballHolder && this.ballHolder.data.team === 'HOU' ? this.ballHolder : null;
+    if (!houCarrier || this.ballState !== 'DRIBBLE') return;
 
     const dist = this.controlledPlayer.position.distanceTo(houCarrier.position);
-    if (dist < 1.4 && this.ballState === 'DRIBBLE') {
-      // Occasional reach-in foul on aggressive poke check
-      if (this.foulCooldownTimer <= 0 && Math.random() < 0.08) {
+    if (dist <= 1.85) {
+      // Check steal angle: reach-in fouls happen from behind/bad angles
+      const toCarrier = new THREE.Vector3().subVectors(houCarrier.position, this.controlledPlayer.position);
+      toCarrier.y = 0;
+      const fwd = new THREE.Vector3();
+      this.controlledPlayer.getWorldDirection(fwd);
+      fwd.y = 0;
+      const angle = fwd.angleTo(toCarrier);
+      const isBadAngle = angle > 1.25;
+
+      if (this.foulCooldownTimer <= 0 && isBadAngle && Math.random() < 0.22) {
         this.triggerFoul(houCarrier, this.controlledPlayer, 'REACH-IN FOUL');
         return;
       }
 
-      const stealChance = 0.45;
-      if (Math.random() < stealChance) {
-        this.ballHolder = null;
-        this.ballState = 'REBOUND';
-        this.activeShot = null;
-        this.ballVel.set((Math.random() - 0.5) * 3, 1.2, (Math.random() - 0.5) * 3);
+      // Success calculation: closer proximity (< 1.2m) yields high success rate
+      const distFactor = THREE.MathUtils.clamp(1.0 - (dist - 0.7) / 1.15, 0.25, 0.90);
+      const baseChance = 0.58 * distFactor;
+
+      if (Math.random() < baseChance) {
         sounds.playSneakerSqueak();
-        this.spawnFloatingStatus('STEAL!', this.controlledPlayer.position, '#ffd700');
-        this.onPossessionChange?.(false);
-        this.lastBallTouchedTeam = 'GSW';
+        sounds.playDribble();
+
+        // Stagger the stripped Houston carrier so they cannot immediately snatch it back
+        houCarrier.idleTimer = 0.85;
+        houCarrier.currentSpeed = 0;
+
+        if (Math.random() < 0.65) {
+          // Clean Pickpocket: Curry snatches the ball directly and breaks out on offense!
+          this.claimBallPossession(this.controlledPlayer);
+          this.spawnFloatingStatus('CLEAN PICKPOCKET! 🖐️', this.controlledPlayer.position, '#ffd700');
+          this.onPossessionChange?.(true);
+        } else {
+          // Poked Loose: ball flies forward for a scramble
+          this.ballHolder = null;
+          this.ballState = 'REBOUND';
+          this.activeShot = null;
+          const forward = new THREE.Vector3();
+          this.controlledPlayer.getWorldDirection(forward);
+          forward.y = 0;
+          forward.normalize();
+          this.ballVel.set(forward.x * 2.8, 1.2, forward.z * 2.8);
+          this.spawnFloatingStatus('BALL POKED LOOSE!', this.ballPos, '#38bdf8');
+          this.lastBallTouchedTeam = 'GSW';
+          this.onPossessionChange?.(false);
+        }
+      } else {
+        this.spawnFloatingStatus('CONTESTED DRIBBLE', houCarrier.position, '#94a3b8');
       }
     }
   }
@@ -2751,11 +2930,11 @@ export class BasketballGame {
     if (team === 'GSW') {
       this.homeScore += points;
       this.onScoreUpdate?.(this.homeScore, this.awayScore, points, 'GSW');
-      this.gswNetWobble = 0.55;
+      this.triggerNetReaction('gsw', 0.85);
     } else {
       this.awayScore += points;
       this.onScoreUpdate?.(this.homeScore, this.awayScore, points, 'HOU');
-      this.houNetWobble = 0.55;
+      this.triggerNetReaction('hou', 0.85);
     }
     sounds.playSwish();
     sounds.playCrowdCheer();
@@ -3046,7 +3225,6 @@ export class BasketballGame {
     const ftZ = isGSW ? -8.8 : 8.8;
 
     if (ft.stage === 'WHISTLE') {
-      this.setupFreeThrowLineup(shooter);
       this.ballPos.set(0, 1.15, ftZ + (isGSW ? -0.22 : 0.22));
       this.ball.position.copy(this.ballPos);
 
@@ -3071,7 +3249,6 @@ export class BasketballGame {
       const isFinalAttempt = ft.attemptsTotal === 1;
       this.handleFreeThrowShotStage(dt, ft, 1, ft.shot1Made, isFinalAttempt, isGSW, rimZ);
     } else if (ft.stage === 'RESET_2') {
-      this.setupFreeThrowLineup(shooter);
       this.ballPos.set(0, 1.15, ftZ + (isGSW ? -0.22 : 0.22));
       this.ball.position.copy(this.ballPos);
       shooter.leftArmPivot.rotation.x = -0.5;
@@ -3099,7 +3276,6 @@ export class BasketballGame {
       const isFinalAttempt = ft.attemptsTotal === 2;
       this.handleFreeThrowShotStage(dt, ft, 2, ft.shot2Made, isFinalAttempt, isGSW, rimZ);
     } else if (ft.stage === 'RESET_3') {
-      this.setupFreeThrowLineup(shooter);
       this.ballPos.set(0, 1.15, ftZ + (isGSW ? -0.22 : 0.22));
       this.ball.position.copy(this.ballPos);
       shooter.leftArmPivot.rotation.x = -0.5;
@@ -3144,9 +3320,11 @@ export class BasketballGame {
     isGSW: boolean,
     rimZ: number
   ) {
-    const flightDuration = 0.92;
+    const flightDuration = 0.95;
     const shooter = ft.fouledPlayer;
     const hasScoredFlag = attempt === 1 ? ft.hasScoredAttempt1 : attempt === 2 ? ft.hasScoredAttempt2 : ft.hasScoredAttempt3;
+    const ftDir = isGSW ? new THREE.Vector3(0, 0, -1) : new THREE.Vector3(0, 0, 1);
+    const ftSide = new THREE.Vector3(-ftDir.z, 0, ftDir.x);
 
     if (isMade) {
       // -------------------------------------------------------------
@@ -3154,32 +3332,16 @@ export class BasketballGame {
       // -------------------------------------------------------------
       if (ft.timer < flightDuration) {
         const prog = Math.min(1.0, ft.timer / flightDuration);
-        this.ballPos.lerpVectors(ft.startPos, ft.targetRim, prog);
-        this.ballPos.y = ft.startPos.y + (this.RIM_HEIGHT - ft.startPos.y) * prog + Math.sin(prog * Math.PI) * 1.55;
+        this.ballPos.x = THREE.MathUtils.lerp(ft.startPos.x, ft.targetRim.x, prog);
+        this.ballPos.z = THREE.MathUtils.lerp(ft.startPos.z, ft.targetRim.z, prog);
+        const deltaY = this.RIM_HEIGHT - ft.startPos.y;
+        const vy0 = (deltaY - 0.5 * this.GRAVITY * flightDuration * flightDuration) / flightDuration;
+        const t = ft.timer;
+        this.ballPos.y = ft.startPos.y + vy0 * t + 0.5 * this.GRAVITY * t * t;
         this.ball.position.copy(this.ballPos);
-        this.ball.rotation.x -= dt * 14;
+        const spinQ = new THREE.Quaternion().setFromAxisAngle(ftSide, -18.0 * dt);
+        this.ball.quaternion.premultiply(spinQ);
       } else {
-        if (!hasScoredFlag) {
-          if (attempt === 1) ft.hasScoredAttempt1 = true;
-          else if (attempt === 2) ft.hasScoredAttempt2 = true;
-          else ft.hasScoredAttempt3 = true;
-
-          sounds.playSwish();
-          sounds.playCrowdCheer();
-          if (isGSW) this.gswNetWobble = 1.25; else this.houNetWobble = 1.25;
-          this.awardFreeThrowPoint(shooter.data.team);
-          this.spawnFloatingStatus('+1 FREE THROW', ft.targetRim, '#10b981');
-
-          const shot1 = attempt === 1 ? 'MADE' : (ft.shot1Made ? 'MADE' : 'MISSED');
-          const shot2 = attempt === 2 ? 'MADE' : (attempt > 2 ? (ft.shot2Made ? 'MADE' : 'MISSED') : 'PENDING');
-          const shot3 = attempt === 3 ? 'MADE' : 'PENDING';
-
-          const statusMsg = ft.attemptsTotal === 1
-            ? 'AND-ONE FREE THROW: GOOD!'
-            : `FREE THROW ${attempt}: GOOD!`;
-          this.emitFoulUI(attempt, statusMsg, shot1, shot2, shot3, { quality: ft.quality, isGreen: ft.isGreen });
-        }
-
         // Drop down through the net and bounce on the court floor
         const dropTime = ft.timer - flightDuration;
         this.ballPos.x = ft.targetRim.x;
@@ -3202,9 +3364,38 @@ export class BasketballGame {
           this.ballPos.y = freeFallY;
         }
         this.ball.position.copy(this.ballPos);
+
+        // While inside net cylinder, deform net vertices around ball
+        if (freeFallY > (this.RIM_HEIGHT - 0.50)) {
+          this.setNetBallInside(isGSW ? 'gsw' : 'hou', true, freeFallY);
+        }
+
+        // ONLY AWARD THE POINT WHEN THE BALL EXITS THE BOTTOM OF THE NET (freeFallY <= RIM_HEIGHT - 0.50)
+        if (!hasScoredFlag && freeFallY <= (this.RIM_HEIGHT - 0.50)) {
+          if (attempt === 1) ft.hasScoredAttempt1 = true;
+          else if (attempt === 2) ft.hasScoredAttempt2 = true;
+          else ft.hasScoredAttempt3 = true;
+
+          this.setNetBallInside(isGSW ? 'gsw' : 'hou', false);
+          this.triggerNetReaction(isGSW ? 'gsw' : 'hou', 0.88, ftDir);
+
+          sounds.playSwish();
+          sounds.playCrowdCheer();
+          this.awardFreeThrowPoint(shooter.data.team);
+          this.spawnFloatingStatus('+1 FREE THROW', ft.targetRim, '#10b981');
+
+          const shot1 = attempt === 1 ? 'MADE' : (ft.shot1Made ? 'MADE' : 'MISSED');
+          const shot2 = attempt === 2 ? 'MADE' : (attempt > 2 ? (ft.shot2Made ? 'MADE' : 'MISSED') : 'PENDING');
+          const shot3 = attempt === 3 ? 'MADE' : 'PENDING';
+
+          const statusMsg = ft.attemptsTotal === 1
+            ? 'AND-ONE FREE THROW: GOOD!'
+            : `FREE THROW ${attempt}: GOOD!`;
+          this.emitFoulUI(attempt, statusMsg, shot1, shot2, shot3, { quality: ft.quality, isGreen: ft.isGreen });
+        }
       }
 
-      if (ft.timer >= 1.85) {
+      if (ft.timer >= 2.0 && (ft.hasBouncedFloor || ft.timer >= 3.5)) {
         const shot1 = ft.shot1Made ? 'MADE' : 'MISSED';
         const shot2 = attempt >= 2 ? (ft.shot2Made ? 'MADE' : 'MISSED') : 'PENDING';
         const shot3 = attempt >= 3 ? (ft.shot3Made ? 'MADE' : 'MISSED') : 'PENDING';
@@ -3219,6 +3410,7 @@ export class BasketballGame {
           ft.stage = attempt === 1 ? 'RESET_2' : 'RESET_3';
           ft.timer = 0;
           ft.hasBouncedFloor = false;
+          this.setupFreeThrowLineup(shooter);
           const nextAttempt = attempt + 1;
           this.emitFoulUI(nextAttempt, `FREE THROW ${nextAttempt} OF ${ft.attemptsTotal}`, shot1, shot2, shot3);
         }
@@ -3231,10 +3423,15 @@ export class BasketballGame {
 
       if (ft.timer < flightDuration) {
         const prog = Math.min(1.0, ft.timer / flightDuration);
-        this.ballPos.lerpVectors(ft.startPos, impactPos, prog);
-        this.ballPos.y = ft.startPos.y + (impactPos.y - ft.startPos.y) * prog + Math.sin(prog * Math.PI) * 1.55;
+        this.ballPos.x = THREE.MathUtils.lerp(ft.startPos.x, impactPos.x, prog);
+        this.ballPos.z = THREE.MathUtils.lerp(ft.startPos.z, impactPos.z, prog);
+        const deltaY = impactPos.y - ft.startPos.y;
+        const vy0 = (deltaY - 0.5 * this.GRAVITY * flightDuration * flightDuration) / flightDuration;
+        const t = ft.timer;
+        this.ballPos.y = ft.startPos.y + vy0 * t + 0.5 * this.GRAVITY * t * t;
         this.ball.position.copy(this.ballPos);
-        this.ball.rotation.x -= dt * 14;
+        const spinQ = new THREE.Quaternion().setFromAxisAngle(ftSide, -18.0 * dt);
+        this.ball.quaternion.premultiply(spinQ);
       } else {
         if (!hasScoredFlag) {
           if (attempt === 1) ft.hasScoredAttempt1 = true;
@@ -3242,7 +3439,7 @@ export class BasketballGame {
           else ft.hasScoredAttempt3 = true;
 
           sounds.playRimClang();
-          if (isGSW) this.gswNetWobble = 0.4; else this.houNetWobble = 0.4;
+          this.triggerNetReaction(isGSW ? 'gsw' : 'hou', 0.35, ftDir);
           this.spawnFloatingStatus('MISSED', impactPos, '#ef4444');
 
           const shot1 = attempt === 1 ? 'MISSED' : (ft.shot1Made ? 'MADE' : 'MISSED');
@@ -3256,16 +3453,14 @@ export class BasketballGame {
         }
 
         if (isFinalAttempt) {
-          // Final attempt miss: Immediately transition to live rebound off the iron!
+          // Final attempt miss: Immediately transition to calculated live rebound off the iron!
           this.resetAllPlayerPoses();
           this.emitFoulUI(null);
           this.activeFoul = null;
           this.ballState = 'REBOUND';
           this.activeShot = null;
-          this.reboundMarker.position.set(0, 0.02, rimZ);
-          this.reboundMarker.visible = true;
           this.ballPos.copy(impactPos);
-          this.ballVel.set((Math.random() - 0.5) * 3.2, 3.2, isGSW ? 2.8 : -2.8);
+          this.calculateReboundArc(new THREE.Vector3(0, 3.06, rimZ));
           this.shotClock = 24.0;
           return;
         }
@@ -3297,6 +3492,7 @@ export class BasketballGame {
         ft.stage = attempt === 1 ? 'RESET_2' : 'RESET_3';
         ft.timer = 0;
         ft.hasBouncedFloor = false;
+        this.setupFreeThrowLineup(shooter);
         const nextAttempt = attempt + 1;
         this.emitFoulUI(nextAttempt, `FREE THROW ${nextAttempt} OF ${ft.attemptsTotal}`, shot1, shot2, shot3);
       }
@@ -3592,7 +3788,10 @@ export class BasketballGame {
       targetHoop.x - shooter.position.x,
       targetHoop.z - shooter.position.z
     ).length();
-    const isThree = distToHoop > 6.75;
+    // Authentic NBA 3-Point Line: Corner 3 is 22ft (6.70m / |x| >= 6.55m along corners), Arc is 23.75ft (7.24m)
+    const isCornerThree = Math.abs(shooter.position.x) >= 6.55 && Math.abs(shooter.position.z - targetHoop.z) <= 4.2;
+    const isArcThree = distToHoop >= 6.75;
+    const isThree = isCornerThree || isArcThree;
     const points = isThree ? 3 : 2;
 
     // Check if close enough for SLAM DUNK or DRIVING LAYUP!
@@ -3621,7 +3820,12 @@ export class BasketballGame {
 
     const ideal = 0.65;
     const diff = Math.abs(holdDuration - ideal);
-    const isGreen = diff < 0.055 || isDunk;
+    // Rating bonus and stamina scaling for green release window
+    const ratingBonus = (shooter.data.threePointRating - 75) * 0.00045;
+    const staminaFactor = shooter === this.controlledPlayer ? this.stamina : 1.0;
+    const staminaPenalty = (1.0 - staminaFactor) * 0.012;
+    const greenTolerance = Math.max(0.040, 0.055 + ratingBonus - staminaPenalty);
+    const isGreen = diff < greenTolerance || isDunk;
 
     const defender = this.getNearestDefender(shooter);
     const defDist = defender ? defender.position.distanceTo(shooter.position) : 99;
@@ -3671,44 +3875,63 @@ export class BasketballGame {
       0,
       targetHoop.z - shooter.position.z
     ).normalize();
-    const sideDir = new THREE.Vector3(-shotDir.z, 0, shotDir.x);
+    const sideDir = new THREE.Vector3(-shotDir.z, 0, shotDir.x).normalize();
 
     const targetPoint = targetHoop.clone();
+    let isInAndOut = false;
 
     if (isDunk) {
       // Slam dunk slams down through the rim
       targetPoint.set(targetHoop.x, this.RIM_HEIGHT - 0.12, targetHoop.z);
     } else if (isGreen) {
-      // Perfect green release: direct center swish
-      targetPoint.set(targetHoop.x, this.RIM_HEIGHT + 0.02, targetHoop.z);
+      // Perfect green release: direct dead-center swish
+      targetPoint.set(targetHoop.x, this.RIM_HEIGHT + 0.03, targetHoop.z);
     } else if (willMake) {
-      if (Math.random() < 0.22 && !isThree) {
+      if (Math.random() < 0.20 && !isThree) {
         // High-percentage bank shot off backboard
         targetPoint.set(
-          targetHoop.x + (Math.random() - 0.5) * 0.1,
-          this.RIM_HEIGHT + 0.32,
+          targetHoop.x + (Math.random() - 0.5) * 0.08,
+          this.RIM_HEIGHT + 0.30,
           backboardZ + (isGSW ? 0.08 : -0.08)
+        );
+      } else if (Math.random() < 0.45) {
+        // Soft shooter's touch: clips the rim lip gently, backspin rattles it in
+        const rimZOffset = (Math.random() < 0.6 ? (isGSW ? -0.14 : 0.14) : (isGSW ? 0.14 : -0.14));
+        targetPoint.set(
+          targetHoop.x + (Math.random() - 0.5) * 0.06,
+          this.RIM_HEIGHT + 0.02,
+          targetHoop.z + rimZOffset
         );
       } else {
         // Clean swish through the hoop opening
         targetPoint.set(
-          targetHoop.x + (Math.random() - 0.5) * 0.04,
-          this.RIM_HEIGHT + 0.02,
-          targetHoop.z + (Math.random() - 0.5) * 0.04
+          targetHoop.x + (Math.random() - 0.5) * 0.03,
+          this.RIM_HEIGHT + 0.03,
+          targetHoop.z + (Math.random() - 0.5) * 0.03
         );
       }
     } else {
-      if (isContested) {
+      // Missed shot trajectory
+      isInAndOut = diff < 0.095 && Math.random() < 0.35 && !isContested;
+
+      if (isInAndOut) {
+        // In-and-out near miss: enters rim cylinder off-center and lips out
+        const sideOffset = (Math.random() > 0.5 ? 1 : -1) * (this.RIM_RADIUS * 0.70);
+        targetPoint.addScaledVector(sideDir, sideOffset);
+        targetPoint.addScaledVector(shotDir, isGSW ? -0.08 : 0.08);
+      } else if (isContested) {
         const sideOffset = (Math.random() > 0.5 ? 1 : -1) * (this.RIM_RADIUS * 1.05);
         targetPoint.addScaledVector(sideDir, sideOffset);
-        targetPoint.addScaledVector(shotDir, -this.RIM_RADIUS * 0.4);
+        targetPoint.addScaledVector(shotDir, -this.RIM_RADIUS * 0.35);
       } else if (holdDuration < ideal) {
-        targetPoint.addScaledVector(shotDir, -this.RIM_RADIUS * 1.15);
+        // Slightly early: comes up short on the front rim
+        targetPoint.addScaledVector(shotDir, -this.RIM_RADIUS * 1.05);
       } else {
-        if (Math.random() < 0.4) {
+        // Slightly late: kicks long onto back iron or backboard
+        if (Math.random() < 0.35) {
           targetPoint.set(
-            targetHoop.x + (Math.random() - 0.5) * 0.25,
-            this.RIM_HEIGHT + 0.25,
+            targetHoop.x + (Math.random() - 0.5) * 0.22,
+            this.RIM_HEIGHT + 0.24,
             backboardZ + (isGSW ? 0.05 : -0.05)
           );
         } else {
@@ -3717,16 +3940,72 @@ export class BasketballGame {
       }
     }
 
-    const startElevation = (isDunk ? 3.35 : 2.05) * (shooter.data.heightScale || 1.0);
+    const startElevation = (isDunk ? 3.35 : 2.08) * (shooter.data.heightScale || 1.0);
     this.ballPos.set(shooter.position.x, startElevation, shooter.position.z).addScaledVector(shotDir, 0.28);
     this.ballPrevPos.copy(this.ballPos);
     this.ball.position.copy(this.ballPos);
 
-    const flightDuration = isDunk ? 0.38 : (isLayup ? 0.58 : THREE.MathUtils.clamp(0.88 + distToHoop * 0.035, 0.95, 1.18));
+    // Realistic distance-based flight time with high-arc physics (scales smoothly from paint to full-court heaves)
+    const flightDuration = isDunk
+      ? 0.35
+      : (isLayup
+        ? 0.48
+        : (distToHoop <= 9.0
+          ? THREE.MathUtils.clamp(0.65 + distToHoop * 0.055, 0.68, 1.25)
+          : 1.25 + (distToHoop - 9.0) * 0.062));
+
     this.ballVel.x = (targetPoint.x - this.ballPos.x) / flightDuration;
     this.ballVel.z = (targetPoint.z - this.ballPos.z) / flightDuration;
     const deltaY = targetPoint.y - this.ballPos.y;
-    this.ballVel.y = (deltaY - 0.5 * this.GRAVITY * flightDuration * flightDuration) / flightDuration;
+    // Account for aerodynamic Magnus lift (+0.85 m/s²) in launch arc calculation
+    const effGravity = isDunk ? this.GRAVITY : (this.GRAVITY + 0.85);
+    this.ballVel.y = (deltaY - 0.5 * effGravity * flightDuration * flightDuration) / flightDuration;
+
+    // Calculate release timing error and spin/curvature variation
+    let lateralCurve = 0;
+
+    if (isDunk) {
+      this.ballSpinAxis.copy(sideDir);
+      this.ballSpinRate = 0;
+    } else if (isGreen) {
+      // Perfect release: crisp, balanced backspin around pure transverse horizontal axis, laser-straight path
+      this.ballSpinAxis.copy(sideDir);
+      this.ballSpinRate = -18.5; // ~2.95 rev/sec
+      lateralCurve = 0;
+    } else {
+      // Non-green release timing error factor (0 = near green, 1 = maximum early/late error)
+      const errFactor = THREE.MathUtils.clamp(diff / 0.22, 0.15, 1.0);
+      const isEarly = holdDuration < ideal;
+
+      // 1. Aerodynamic in-flight curvature variation (Magnus lateral force):
+      // Early releases tend to push outward; late releases tend to pull inward, with randomized finger-roll variance
+      const timingDriftDir = isEarly ? -0.32 : 0.32;
+      const randomDriftBias = (Math.random() - 0.5) * 1.8;
+
+      if (willMake) {
+        // Successful shots with slight mistiming experience a subtle organic wobble (up to ~0.09 m/s²) that still swishes or rattles in
+        lateralCurve = (randomDriftBias * 0.08) * errFactor;
+      } else {
+        // Missed shots experience realistic lateral slice/fade curvature (up to ~0.42 m/s²) based on release timing error
+        lateralCurve = (timingDriftDir * 0.45 + randomDriftBias * 0.55) * 0.42 * errFactor;
+      }
+
+      // 2. 3D Spin Axis Tilt & Seam Wobble:
+      // An imperfect finger release tilts the spin axis off purely transverse horizontal, producing authentic tilted seam rotation
+      const tiltAngle = (Math.random() - 0.5) * 0.52 * errFactor; // up to ~15 degrees roll tilt
+      const yawAngle = (isEarly ? -1 : 1) * (0.12 + Math.random() * 0.28) * errFactor; // yaw tilt along vertical
+      this.ballSpinAxis.copy(sideDir);
+      this.ballSpinAxis.applyAxisAngle(shotDir, tiltAngle);
+      this.ballSpinAxis.applyAxisAngle(new THREE.Vector3(0, 1, 0), yawAngle).normalize();
+
+      // 3. Spin Rate Variation:
+      // Early release has slightly less wrist snap (-15 to -17 rad/s), late release has rushed overspin (-19 to -23 rad/s)
+      if (isEarly) {
+        this.ballSpinRate = -15.5 - Math.random() * 2.5;
+      } else {
+        this.ballSpinRate = -19.5 - Math.random() * 3.8;
+      }
+    }
 
     this.activeShot = {
       isGreen,
@@ -3737,10 +4016,13 @@ export class BasketballGame {
       shooterTeam: shooter.data.team,
       hoopPos: targetHoop.clone(),
       backboardZ,
+      hasEnteredRim: false,
       hasScored: false,
       hasHitRim: false,
       hasHitFloor: false,
       rattlePhase: 0,
+      isInAndOut,
+      lateralCurve,
     };
   }
 
@@ -3847,6 +4129,9 @@ export class BasketballGame {
       this.ballVel.z = (targetPos.z - this.ballPos.z) / passTime;
       const deltaY = targetPos.y - this.ballPos.y;
       this.ballVel.y = (deltaY - 0.5 * this.GRAVITY * passTime * passTime) / passTime;
+      const passSide = new THREE.Vector3(-forward.z, 0, forward.x).normalize();
+      this.ballSpinAxis.copy(passSide);
+      this.ballSpinRate = -14.0;
     } else {
       const bounceSpot = new THREE.Vector3().lerpVectors(this.ballPos, this.passReceiverPosLead, 0.55);
       bounceSpot.y = this.BALL_RADIUS;
@@ -3856,6 +4141,9 @@ export class BasketballGame {
       this.ballVel.z = (bounceSpot.z - this.ballPos.z) / firstLegTime;
       const deltaY = bounceSpot.y - this.ballPos.y;
       this.ballVel.y = (deltaY - 0.5 * this.GRAVITY * firstLegTime * firstLegTime) / firstLegTime;
+      const passSide = new THREE.Vector3(-forward.z, 0, forward.x).normalize();
+      this.ballSpinAxis.copy(passSide);
+      this.ballSpinRate = -10.0;
     }
   }
 
@@ -3918,7 +4206,8 @@ export class BasketballGame {
       this.ballPos.y = dribbleY;
       this.ballPrevPos.copy(this.ballPos);
       this.ball.position.copy(this.ballPos);
-      this.ball.rotation.x += dt * (8 + speedFrac * 10);
+      const dribbleSpinQ = new THREE.Quaternion().setFromAxisAngle(right, (8 + speedFrac * 10) * dt);
+      this.ball.quaternion.premultiply(dribbleSpinQ);
 
       // Dynamic Arm & Elbow Articulation:
       const isLeft = holder.crossoverBlend < 0;
@@ -3961,11 +4250,33 @@ export class BasketballGame {
     this.ballPos.addScaledVector(this.ballVel, dt);
 
     if (this.ballState === 'SHOT') {
-      this.ball.rotation.x -= dt * (Math.PI * 4);
+      // Subtle aerodynamic lift from backspin (Magnus effect)
+      if (!this.activeShot?.isDunk) {
+        this.ballVel.y += 0.85 * dt;
+
+        // Dynamic lateral curvature variation from release timing (aerodynamic side-force)
+        if (this.activeShot?.lateralCurve && !this.activeShot.hasEnteredRim && !this.activeShot.hasHitRim) {
+          const horizSpeed = Math.hypot(this.ballVel.x, this.ballVel.z);
+          if (horizSpeed > 0.1) {
+            // Horizontal perpendicular vector to flight path (-vz, 0, vx)
+            const sideNorm = new THREE.Vector3(-this.ballVel.z, 0, this.ballVel.x).normalize();
+            this.ballVel.addScaledVector(sideNorm, this.activeShot.lateralCurve * dt);
+          }
+        }
+      }
+      const deltaQ = new THREE.Quaternion().setFromAxisAngle(this.ballSpinAxis, this.ballSpinRate * dt);
+      this.ball.quaternion.premultiply(deltaQ);
     } else if (this.isBallRolling) {
-      const speed = new THREE.Vector2(this.ballVel.x, this.ballVel.z).length();
+      const speed = Math.hypot(this.ballVel.x, this.ballVel.z);
       if (speed > 0.01) {
-        this.ball.rotation.x += (speed / this.BALL_RADIUS) * dt;
+        const rollAxis = new THREE.Vector3(-this.ballVel.z, 0, this.ballVel.x).normalize();
+        const deltaQ = new THREE.Quaternion().setFromAxisAngle(rollAxis, (speed / this.BALL_RADIUS) * dt);
+        this.ball.quaternion.premultiply(deltaQ);
+      }
+    } else if (this.ballState === 'REBOUND' || this.ballState === 'PASS' || this.ballState === 'BOUNCE_PASS') {
+      if (Math.abs(this.ballSpinRate) > 0.05) {
+        const deltaQ = new THREE.Quaternion().setFromAxisAngle(this.ballSpinAxis, this.ballSpinRate * dt);
+        this.ball.quaternion.premultiply(deltaQ);
       }
     }
 
@@ -4036,10 +4347,12 @@ export class BasketballGame {
       }
     }
 
-    // Rebound target floor decal
+    // Rebound target floor decal: Lock onto calculated predicted floor bounce spot
     if (this.ballState === 'REBOUND') {
-      if (this.ballPos.y > 0.3) {
-        this.reboundMarker.position.set(this.ballPos.x, 0.02, this.ballPos.z);
+      if (this.ballPos.y > 0.35) {
+        this.reboundMarker.position.set(this.predictedBouncePoint.x, 0.02, this.predictedBouncePoint.z);
+        const pulse = 1.0 + Math.sin(this.gameClock * 8.0) * 0.15;
+        this.reboundMarker.scale.set(pulse, 1, pulse);
         this.reboundMarker.visible = true;
       } else {
         this.reboundMarker.visible = false;
@@ -4048,8 +4361,8 @@ export class BasketballGame {
       this.reboundMarker.visible = false;
     }
 
-    // Active loose ball / rebound pursuit whenever there is no ball holder!
-    if (!this.ballHolder && this.ballState !== 'MADE_DROP') {
+    // Active loose ball / rebound pursuit ONLY when ball is in REBOUND state (never during SHOT, PASS, or MADE_DROP)
+    if (!this.ballHolder && this.ballState === 'REBOUND') {
       this.updateReboundPursuit(dt);
     }
 
@@ -4065,10 +4378,17 @@ export class BasketballGame {
 
     if (this.ballState === 'MADE_DROP') {
       this.postScoreTimer += dt;
-      if (this.postScoreTimer > 1.2 && this.floorBounceCount >= 1 && this.nextPossessionTeam) {
-        this.executeInbound(this.nextPossessionTeam);
+      // The ball MUST fall completely through the net and touch the hardwood floor first!
+      // Once it touches the ground (floorBounceCount >= 1), let it bounce and settle for 0.85s before continuing to inbound
+      const hasTouchedFloor = this.floorBounceCount >= 1;
+      const canInbound = (hasTouchedFloor && this.postScoreTimer >= 0.85) || this.postScoreTimer >= 4.0;
+
+      if (canInbound && this.nextPossessionTeam) {
+        const team = this.nextPossessionTeam;
         this.nextPossessionTeam = null;
         this.postScoreTimer = 0;
+        this.floorBounceCount = 0;
+        this.executeInbound(team);
       }
     }
 
@@ -4096,17 +4416,18 @@ export class BasketballGame {
           if (this.activeShot) {
             this.activeShot.hasHitRim = true;
           }
-          this.ballVel.z = -this.ballVel.z * 0.65;
-          this.ballVel.x *= 0.85;
-          this.ballVel.y *= 0.85;
+          this.ballVel.z = -this.ballVel.z * 0.72;
+          this.ballVel.x *= 0.88;
+          this.ballVel.y *= 0.88;
           this.ballPos.z = h.zBB + (h.isGSW ? (this.BALL_RADIUS + 0.025) : -(this.BALL_RADIUS + 0.025));
+          this.ballSpinRate = -this.ballSpinRate * 0.5;
         }
       }
     });
   }
 
   private checkRimCollisions(dt: number) {
-    if ((this.activeShot?.willMake || this.activeShot?.isGreen) && !this.activeShot.hasScored) return;
+    if (this.activeShot?.isGreen && !this.activeShot.hasScored) return;
 
     const hoops = [this.gswHoopPos, this.houHoopPos];
 
@@ -4117,6 +4438,8 @@ export class BasketballGame {
 
       if (Math.abs(this.ballPos.y - this.RIM_HEIGHT) < 0.4 && distXZ < 0.45) {
         this.rimNearTimer += dt;
+      } else {
+        this.rimNearTimer = Math.max(0, this.rimNearTimer - dt * 2.0);
       }
 
       if (distXZ < 0.001) return;
@@ -4137,7 +4460,6 @@ export class BasketballGame {
 
         if (vDotN < 0) {
           this.rimBounceCount++;
-          sounds.playRimClang();
 
           if (this.activeShot) {
             this.activeShot.hasHitRim = true;
@@ -4147,36 +4469,54 @@ export class BasketballGame {
             }
           }
 
-          this.ballVel.y = Math.abs(this.ballVel.y) * 0.6 + 0.8;
-          this.ballVel.x = (this.ballVel.x - 1.5 * vDotN * nx) * 0.5;
-          this.ballVel.z = (this.ballVel.z - 1.5 * vDotN * nz) * 0.5;
+          // Case 1: Made shot with soft shooter's touch (slight rim graze/rattle)
+          if (this.activeShot?.willMake) {
+            this.activeShot.rattlePhase++;
+            this.activeShot.hasTouchedRimSoftly = true;
+            sounds.playRimClang();
+
+            const toCenter = new THREE.Vector2(hoop.x - this.ballPos.x, hoop.z - this.ballPos.z).normalize();
+            this.ballVel.x = toCenter.x * 0.55;
+            this.ballVel.z = toCenter.y * 0.55;
+            // Ensure ball funnels downward cleanly through rim into net
+            this.ballVel.y = Math.min(-0.85, this.ballVel.y < 0 ? this.ballVel.y * 0.6 : -0.85);
+            this.ballSpinRate *= 0.5;
+
+            this.ballPos.set(
+              ringX + nx * (contactDist + 0.003),
+              ringY + ny * (contactDist + 0.003),
+              ringZ + nz * (contactDist + 0.003)
+            );
+            return;
+          }
+
+          // Case 2: Missed shot physical collision off iron
+          sounds.playRimClang();
+
+          const e = 0.68;
+          const normalImpulse = -(1 + e) * vDotN;
+          this.ballVel.x += nx * normalImpulse;
+          this.ballVel.y += ny * normalImpulse;
+          this.ballVel.z += nz * normalImpulse;
+
+          this.ballVel.x *= 0.88;
+          this.ballVel.z *= 0.88;
+          this.ballVel.y = Math.max(1.1, this.ballVel.y * 0.82);
 
           this.ballVel.x += (Math.random() - 0.5) * 0.35;
           this.ballVel.z += (Math.random() - 0.5) * 0.35;
 
           this.ballPos.set(
-            ringX + nx * (contactDist + 0.004),
-            ringY + ny * (contactDist + 0.004),
-            ringZ + nz * (contactDist + 0.004)
+            ringX + nx * (contactDist + 0.005),
+            ringY + ny * (contactDist + 0.005),
+            ringZ + nz * (contactDist + 0.005)
           );
 
           if (this.activeShot && !this.activeShot.hasScored) {
-            const toCenter = new THREE.Vector2(hoop.x - this.ballPos.x, hoop.z - this.ballPos.z);
-
-            if (this.activeShot.willMake) {
-              this.activeShot.rattlePhase++;
-              if (this.activeShot.rattlePhase >= 2 || distXZ < this.RIM_RADIUS) {
-                toCenter.normalize();
-                this.ballVel.x += toCenter.x * 0.65;
-                this.ballVel.z += toCenter.y * 0.65;
-                this.ballVel.y = THREE.MathUtils.clamp(this.ballVel.y, -0.6, 0.8);
-              }
-            } else {
-              toCenter.normalize();
-              this.ballVel.x -= toCenter.x * 0.95;
-              this.ballVel.z -= toCenter.y * 0.95;
-              this.ballVel.y += 0.5;
-              this.ballState = 'REBOUND';
+            this.ballState = 'REBOUND';
+            this.calculateReboundArc(hoop, nx, nz);
+            if (this.activeShot.isInAndOut && this.rimBounceCount === 1) {
+              this.spawnFloatingStatus('IN-AND-OUT! HEARTBREAK!', this.ballPos, '#f59e0b');
             }
           }
         }
@@ -4185,11 +4525,11 @@ export class BasketballGame {
   }
 
   private checkScoringPlaneCrossing() {
-    if (this.activeShot?.hasScored || this.ballState === 'MADE_DROP') return;
+    if (this.activeShot?.hasScored) return;
 
     const hoops = [
-      { pos: this.gswHoopPos, team: 'GSW', netWobble: 'gsw' },
-      { pos: this.houHoopPos, team: 'HOU', netWobble: 'hou' },
+      { key: 'gsw' as const, pos: this.gswHoopPos, team: 'GSW' as const },
+      { key: 'hou' as const, pos: this.houHoopPos, team: 'HOU' as const },
     ];
 
     for (const h of hoops) {
@@ -4197,95 +4537,146 @@ export class BasketballGame {
       const dz = this.ballPos.z - h.pos.z;
       const distXZ = Math.hypot(dx, dz);
 
-      // Robust horizontal cylinder detection: ball center within rim radius + tolerance
-      const insideCylinder = distXZ <= (this.RIM_RADIUS + 0.08);
-
-      // Ball is descending downwards
-      const isDescending = this.ballVel.y < 0.15 || this.ballPos.y < this.ballPrevPos.y;
-
-      // Vertical scoring band: passing down through the rim opening (between 2.50m and 3.25m)
-      const inHeightZone = this.ballPos.y <= (this.RIM_HEIGHT + 0.14) && this.ballPos.y >= (this.RIM_HEIGHT - 0.55);
-      const crossedDownward = (this.ballPrevPos.y >= (this.RIM_HEIGHT - 0.10) && this.ballPos.y <= (this.RIM_HEIGHT + 0.14)) ||
-                              (this.ballVel.y < 0 && Math.abs(this.ballPos.y - this.RIM_HEIGHT) < 0.35);
-
-      if (insideCylinder && isDescending && (inHeightZone || crossedDownward)) {
-        const isDunk = this.activeShot?.isDunk || false;
-        const isGreen = this.activeShot?.isGreen || false;
-        const points = this.activeShot?.points || 2;
-        const scoringTeam: 'GSW' | 'HOU' = (this.activeShot?.shooterTeam) || (h.team === 'GSW' ? 'GSW' : 'HOU');
-
-        if (this.activeShot) {
-          this.activeShot.hasScored = true;
+      // -------------------------------------------------------------
+      // STAGE 1: BALL ENTERS THE RING FROM ABOVE (Top Rim Level)
+      // -------------------------------------------------------------
+      if (!this.activeShot?.hasEnteredRim && (this.ballState === 'SHOT' || this.ballState === 'REBOUND')) {
+        // Continuous Collision Detection (CCD): Compute exact intersection with horizontal rim plane (y = RIM_HEIGHT)
+        let crossingX = this.ballPos.x;
+        let crossingZ = this.ballPos.z;
+        const dy = this.ballPrevPos.y - this.ballPos.y;
+        if (dy > 0.001 && this.ballPrevPos.y >= (this.RIM_HEIGHT - 0.05) && this.ballPos.y <= (this.RIM_HEIGHT + 0.10)) {
+          const t = (this.ballPrevPos.y - this.RIM_HEIGHT) / dy;
+          crossingX = THREE.MathUtils.lerp(this.ballPrevPos.x, this.ballPos.x, t);
+          crossingZ = THREE.MathUtils.lerp(this.ballPrevPos.z, this.ballPos.z, t);
         }
+        const distCrossingXZ = Math.hypot(crossingX - h.pos.x, crossingZ - h.pos.z);
+        const insideCylinder = distXZ <= (this.RIM_RADIUS * 1.05) || distCrossingXZ <= (this.RIM_RADIUS * 1.02);
+        const isDescending = this.ballVel.y < 0.1 || this.ballPos.y < this.ballPrevPos.y;
+        const enteredRimTop =
+          (this.ballPrevPos.y >= (this.RIM_HEIGHT - 0.12) && this.ballPos.y <= (this.RIM_HEIGHT + 0.22)) ||
+          (this.ballVel.y < 0 && Math.abs(this.ballPos.y - this.RIM_HEIGHT) < 0.25);
 
-        this.ballState = 'MADE_DROP';
-        this.floorBounceCount = 0;
-        this.postScoreTimer = 0;
-
-        if (scoringTeam === 'GSW') {
-          this.homeScore += points;
-        } else {
-          this.awayScore += points;
-        }
-        this.onScoreUpdate?.(this.homeScore, this.awayScore, points, scoringTeam);
-
-        // Audio & Visual celebratory feedback
-        if (isDunk) {
-          sounds.playDunk();
-        } else {
-          sounds.playSwish();
-        }
-        sounds.playCrowdCheer();
-
-        // Trigger celebratory animation on the scorer
-        const scorer = this.activeShot?.shooter;
-        if (scorer && !scorer.isCelebrationAnim) {
-          scorer.isCelebrationAnim = true;
-          scorer.celebrationAnimTimer = 0;
-          if (isDunk) {
-            scorer.celebrationType = 'DUNK_FLEX';
-          } else if (points === 3 && (scorer.data.name.includes('CURRY') || scorer.data.name.includes('THOMPSON'))) {
-            scorer.celebrationType = isGreen ? 'NIGHT_NIGHT' : 'SHIMMY';
-          } else if (isGreen) {
-            scorer.celebrationType = 'SHIMMY';
+        if (insideCylinder && isDescending && enteredRimTop) {
+          if (!this.activeShot) {
+            const shooter = this.players.find(p => p.data.team === (h.team === 'GSW' ? 'GSW' : 'HOU')) || this.controlledPlayer;
+            this.activeShot = {
+              isGreen: false,
+              willMake: true,
+              isDunk: false,
+              points: 2,
+              shooter,
+              shooterTeam: shooter.data.team,
+              hoopPos: h.pos.clone(),
+              backboardZ: h.team === 'GSW' ? -13.38 : 13.38,
+              hasEnteredRim: true,
+              hasScored: false,
+              hasHitRim: true,
+              hasHitFloor: false,
+              rattlePhase: 1,
+            };
           } else {
-            scorer.celebrationType = 'DUNK_FLEX';
+            this.activeShot.hasEnteredRim = true;
           }
-        }
 
-        this.spawnFloatingScore(points, h.pos);
-        if (isGreen) {
-          this.spawnGreenConfetti(h.pos);
-        }
+          this.ballState = 'MADE_DROP';
+          this.floorBounceCount = 0;
+          this.postScoreTimer = 0;
 
-        if (h.netWobble === 'gsw') {
-          this.gswNetWobble = 0.45;
-        } else {
-          this.houNetWobble = 0.45;
-        }
+          // Sound of passing into net / dunk impact
+          if (this.activeShot?.isDunk) {
+            sounds.playDunk();
+          } else {
+            sounds.playSwish();
+          }
 
-        // Guide ball down cleanly through net throat
-        this.ballPos.x = h.pos.x * 0.75 + this.ballPos.x * 0.25;
-        this.ballPos.z = h.pos.z * 0.75 + this.ballPos.z * 0.25;
-        this.ballVel.x *= 0.25;
-        this.ballVel.z *= 0.25;
-        this.ballVel.y = -2.2;
+          // Register ball inside net for vertex deformation
+          this.setNetBallInside(h.key, true, this.ballPos.y);
 
-        if (this.pendingShootingFoul) {
-          const foul = this.pendingShootingFoul;
-          this.pendingShootingFoul = null;
-          this.nextPossessionTeam = null;
-          sounds.playCrowdCheer();
-          this.spawnFloatingStatus('AND-ONE! BASKET COUNTS!', h.pos, '#10b981');
-          setTimeout(() => {
-            this.triggerFoul(foul.shooter, foul.fouler, 'AND-ONE', 1, true);
-          }, 850);
+          // Guide ball down cleanly centered through net throat towards bottom exit
+          this.ballPos.x = h.pos.x * 0.75 + this.ballPos.x * 0.25;
+          this.ballPos.z = h.pos.z * 0.75 + this.ballPos.z * 0.25;
+          this.ballVel.x *= 0.20;
+          this.ballVel.z *= 0.20;
+          this.ballVel.y = -2.3; // Downward velocity through net
           break;
         }
+      }
 
-        this.nextPossessionTeam = scoringTeam === 'GSW' ? 'HOU' : 'GSW';
-        this.shotClock = 24.0;
-        break;
+      // -------------------------------------------------------------
+      // STAGE 2: BALL TRAVELS DOWN AND EXITS THE BOTTOM OF THE NET -> AWARD THE POINT!
+      // -------------------------------------------------------------
+      if (this.ballState === 'MADE_DROP' && this.activeShot?.hasEnteredRim && distXZ <= 0.75) {
+        // While still inside the net cylinder:
+        if (this.ballPos.y > (this.RIM_HEIGHT - 0.48)) {
+          this.setNetBallInside(h.key, true, this.ballPos.y);
+          // Net funneling & cloth friction:
+          this.ballPos.x = THREE.MathUtils.lerp(this.ballPos.x, h.pos.x, 0.20);
+          this.ballPos.z = THREE.MathUtils.lerp(this.ballPos.z, h.pos.z, 0.20);
+          this.ballVel.x *= 0.85;
+          this.ballVel.z *= 0.85;
+          this.ballVel.y = -2.3;
+        } else if (!this.activeShot.hasScored) {
+          // Ball has passed through the rim AND exited the bottom of the net!
+          // NOW AND ONLY NOW: Officially award the point!
+          this.activeShot.hasScored = true;
+          this.setNetBallInside(h.key, false);
+
+          // Trigger physical vertex snap & wave ripple on the net mesh
+          this.triggerNetReaction(
+            h.key,
+            this.activeShot.isDunk ? 1.0 : (this.activeShot.isGreen ? 0.95 : 0.85),
+            this.ballVel
+          );
+
+          const points = this.activeShot.points || 2;
+          const isDunk = this.activeShot.isDunk || false;
+          const isGreen = this.activeShot.isGreen || false;
+          const scoringTeam: 'GSW' | 'HOU' = (this.activeShot.shooterTeam) || (h.team === 'GSW' ? 'GSW' : 'HOU');
+
+          if (scoringTeam === 'GSW') {
+            this.homeScore += points;
+          } else {
+            this.awayScore += points;
+          }
+          this.onScoreUpdate?.(this.homeScore, this.awayScore, points, scoringTeam);
+
+          sounds.playCrowdCheer();
+          this.spawnFloatingScore(points, h.pos);
+          if (isGreen) {
+            this.spawnGreenConfetti(h.pos);
+          }
+
+          // Trigger celebratory animation on the scorer
+          const scorer = this.activeShot.shooter;
+          if (scorer && !scorer.isCelebrationAnim) {
+            scorer.isCelebrationAnim = true;
+            scorer.celebrationAnimTimer = 0;
+            if (isDunk) {
+              scorer.celebrationType = 'DUNK_FLEX';
+            } else if (points === 3 && (scorer.data.name.includes('CURRY') || scorer.data.name.includes('THOMPSON'))) {
+              scorer.celebrationType = isGreen ? 'NIGHT_NIGHT' : 'SHIMMY';
+            } else if (isGreen) {
+              scorer.celebrationType = 'SHIMMY';
+            } else {
+              scorer.celebrationType = 'DUNK_FLEX';
+            }
+          }
+
+          if (this.pendingShootingFoul) {
+            const foul = this.pendingShootingFoul;
+            this.pendingShootingFoul = null;
+            this.nextPossessionTeam = null;
+            this.spawnFloatingStatus('AND-ONE! BASKET COUNTS!', h.pos, '#10b981');
+            setTimeout(() => {
+              this.triggerFoul(foul.shooter, foul.fouler, 'AND-ONE', 1, true);
+            }, 850);
+          } else {
+            this.nextPossessionTeam = scoringTeam === 'GSW' ? 'HOU' : 'GSW';
+            this.shotClock = 24.0;
+          }
+          break;
+        }
       }
     }
   }
@@ -4368,9 +4759,16 @@ export class BasketballGame {
       }
 
       if (Math.abs(this.ballVel.y) > 0.45 && this.floorBounceCount < 4) {
-        this.ballVel.y = -this.ballVel.y * 0.75;
-        this.ballVel.x *= 0.80;
-        this.ballVel.z *= 0.80;
+        this.ballVel.y = -this.ballVel.y * 0.74;
+        this.ballVel.x *= 0.82;
+        this.ballVel.z *= 0.82;
+        // Friction with hardwood converts backspin into forward roll topspin
+        this.ballSpinRate = -this.ballSpinRate * 0.45;
+        // When scored basket hits the hardwood ground for the first time, reset postScoreTimer
+        // so the full 0.85s bounce and settle is observed on the floor
+        if (this.ballState === 'MADE_DROP' && this.floorBounceCount === 0) {
+          this.postScoreTimer = 0;
+        }
         this.floorBounceCount++;
         sounds.playDribble();
       } else {
@@ -4381,21 +4779,83 @@ export class BasketballGame {
 
         if (this.ballVel.lengthSq() < 0.005) {
           this.ballVel.set(0, 0, 0);
+          this.ballSpinRate = 0;
         }
       }
     }
   }
 
+  // --------------------------------------------------------------------------
+  // CALCULATED REBOUND ARC & BIG MEN TARGETING ENGINE
+  // --------------------------------------------------------------------------
+  private calculateReboundArc(hoop: THREE.Vector3, nx?: number, nz?: number) {
+    const isGSWHoop = hoop.z < 0;
+    const outwardZ = isGSWHoop ? 1 : -1;
+
+    // Realistic upward rebound pop off the iron (2.8m/s to 4.2m/s)
+    this.ballVel.y = Math.min(4.4, Math.max(2.8, Math.abs(this.ballVel.y) * 0.75 + 1.8));
+
+    // Horizontal rebound velocity: combination of rim deflection normal and outward kick into paint
+    const lateralDeflect = (nx !== undefined ? nx * 2.2 : (Math.random() - 0.5) * 2.8) + (Math.random() - 0.5) * 0.8;
+    const forwardKick = outwardZ * (1.6 + Math.random() * 1.8) + (nz !== undefined ? nz * 1.2 : 0);
+
+    this.ballVel.x = THREE.MathUtils.clamp(lateralDeflect, -4.5, 4.5);
+    this.ballVel.z = THREE.MathUtils.clamp(forwardKick, isGSWHoop ? 1.2 : -4.8, isGSWHoop ? 4.8 : -1.2);
+
+    // Calculate exact ballistic landing spot on the court floor
+    const effG = Math.abs(this.GRAVITY);
+    const y0 = this.ballPos.y;
+    const vy = this.ballVel.y;
+    const deltaY = Math.max(0.1, y0 - this.BALL_RADIUS);
+    const tLand = (vy + Math.sqrt(Math.max(0.01, vy * vy + 2 * effG * deltaY))) / effG;
+
+    const predX = THREE.MathUtils.clamp(this.ballPos.x + this.ballVel.x * tLand, -6.5, 6.5);
+    const predZ = THREE.MathUtils.clamp(this.ballPos.z + this.ballVel.z * tLand, -13.2, 13.2);
+
+    this.predictedBouncePoint.set(predX, 0.02, predZ);
+    this.reboundMarker.position.copy(this.predictedBouncePoint);
+    this.reboundMarker.visible = true;
+
+    // Trigger big men to immediately box out and move to contest the rebound!
+    this.triggerBigMenBoxOutAndRebound(hoop);
+  }
+
+  private triggerBigMenBoxOutAndRebound(hoop: THREE.Vector3) {
+    const gswBigs = this.players.filter(p => p.data.team === 'GSW' && (p.data.position === 'C' || p.data.position === 'PF'));
+    const houBigs = this.players.filter(p => p.data.team === 'HOU' && (p.data.position === 'C' || p.data.position === 'PF'));
+
+    const gswRebounder = gswBigs.sort((a, b) => a.position.distanceTo(this.predictedBouncePoint) - b.position.distanceTo(this.predictedBouncePoint))[0]
+      || this.players.filter(p => p.data.team === 'GSW').sort((a, b) => a.position.distanceTo(this.predictedBouncePoint) - b.position.distanceTo(this.predictedBouncePoint))[0];
+
+    const houRebounder = houBigs.sort((a, b) => a.position.distanceTo(this.predictedBouncePoint) - b.position.distanceTo(this.predictedBouncePoint))[0]
+      || this.players.filter(p => p.data.team === 'HOU').sort((a, b) => a.position.distanceTo(this.predictedBouncePoint) - b.position.distanceTo(this.predictedBouncePoint))[0];
+
+    const shooterTeam = this.activeShot?.shooterTeam || 'GSW';
+    const defRebounder = shooterTeam === 'GSW' ? houRebounder : gswRebounder;
+    const offRebounder = shooterTeam === 'GSW' ? gswRebounder : houRebounder;
+
+    if (defRebounder) {
+      defRebounder.isBoxOut = true;
+      defRebounder.boxOutTimer = 1.0;
+    }
+    if (offRebounder) {
+      offRebounder.isBoxOut = true;
+      offRebounder.boxOutTimer = 0.8;
+    }
+  }
+
   private updateReboundPursuit(dt: number) {
+    if (this.ballState !== 'REBOUND') return;
+
     // 1. Give human player instant first-priority pickup if within range
     if (this.controlledPlayer) {
       const distXZ = Math.hypot(
         this.controlledPlayer.position.x - this.ballPos.x,
         this.controlledPlayer.position.z - this.ballPos.z
       );
-      const isControlledJumping = this.controlledPlayer.isDefendingAnim || !!this.keys[' '];
-      const maxCatchDist = isControlledJumping ? 1.75 : 1.45;
-      const maxCatchY = isControlledJumping ? 2.75 : 2.10;
+      const isControlledJumping = this.controlledPlayer.isReboundingAnim || this.controlledPlayer.isDefendingAnim || !!this.keys[' '];
+      const maxCatchDist = isControlledJumping ? 1.85 : 1.45;
+      const maxCatchY = isControlledJumping ? 3.20 : 2.15;
 
       if (distXZ < maxCatchDist && this.ballPos.y < maxCatchY) {
         this.claimBallPossession(this.controlledPlayer);
@@ -4403,21 +4863,26 @@ export class BasketballGame {
       }
     }
 
-    // 2. Sort players across both teams by horizontal proximity to the ball
+    // 2. Big Men and nearest rebounders converge on the predicted bounce point
+    const targetPoint = this.ballPos.y > 1.25 ? this.predictedBouncePoint : this.ballPos;
+
+    // Sort players across both teams by priority to predicted bounce point (big men get priority weight)
     const sortedPlayers = [...this.players].sort((a, b) => {
-      const da = Math.hypot(a.position.x - this.ballPos.x, a.position.z - this.ballPos.z);
-      const db = Math.hypot(b.position.x - this.ballPos.x, b.position.z - this.ballPos.z);
+      const isBigA = a.data.position === 'C' || a.data.position === 'PF' ? 1 : 0;
+      const isBigB = b.data.position === 'C' || b.data.position === 'PF' ? 1 : 0;
+      const da = Math.hypot(a.position.x - targetPoint.x, a.position.z - targetPoint.z) - isBigA * 0.85;
+      const db = Math.hypot(b.position.x - targetPoint.x, b.position.z - targetPoint.z) - isBigB * 0.85;
       return da - db;
     });
 
     // High-traffic tip-out scramble on contested aerial rebounds
-    const highContenders = sortedPlayers.filter(r => r.position.distanceTo(this.ballPos) < 1.35);
-    if (highContenders.length >= 2 && Math.random() < 0.12 && this.ballPos.y > 1.8) {
+    const highContenders = sortedPlayers.filter(r => r.position.distanceTo(this.ballPos) < 1.45);
+    if (highContenders.length >= 2 && Math.random() < 0.10 && this.ballPos.y > 2.0) {
       const tipper = highContenders[Math.floor(Math.random() * highContenders.length)];
       const tipDir = new THREE.Vector3(
         (Math.random() - 0.5) * 4.5,
-        1.8,
-        tipper.data.team === 'GSW' ? 5.0 : -5.0
+        2.2,
+        tipper.data.team === 'GSW' ? 4.5 : -4.5
       );
       this.ballVel.copy(tipDir);
       sounds.playBlock();
@@ -4425,20 +4890,38 @@ export class BasketballGame {
       return;
     }
 
-    // AI players actively pursue and scoop up the loose ball
+    // AI big men and nearest players actively contest the rebound
     for (const p of sortedPlayers.slice(0, 6)) {
+      const isBig = p.data.position === 'C' || p.data.position === 'PF';
+      const speedMult = isBig ? 1.15 : 0.95;
+
+      // Handle box-out countdown
+      if (p.isBoxOut && p.boxOutTimer) {
+        p.boxOutTimer -= dt;
+        if (p.boxOutTimer <= 0) p.isBoxOut = false;
+      }
+
       if (p !== this.controlledPlayer) {
-        const toBall = new THREE.Vector3(this.ballPos.x - p.position.x, 0, this.ballPos.z - p.position.z);
-        if (toBall.length() > 0.15) {
-          toBall.normalize();
-          p.position.addScaledVector(toBall, p.data.speed * 0.92 * dt);
-          p.lookAt(this.ballPos.x, p.position.y, this.ballPos.z);
+        const toTarget = new THREE.Vector3(targetPoint.x - p.position.x, 0, targetPoint.z - p.position.z);
+        if (toTarget.length() > 0.18) {
+          toTarget.normalize();
+          p.position.addScaledVector(toTarget, p.data.speed * speedMult * dt);
+          p.lookAt(targetPoint.x, p.position.y, targetPoint.z);
         }
       }
 
       const distXZ = Math.hypot(p.position.x - this.ballPos.x, p.position.z - this.ballPos.z);
-      const maxCatchDist = 1.35;
-      const maxCatchY = 2.10;
+      const distToTargetXZ = Math.hypot(p.position.x - targetPoint.x, p.position.z - targetPoint.z);
+
+      // Trigger aerial jumping contest when ball is descending or in the air
+      if ((distToTargetXZ < 1.95 || distXZ < 1.75) && this.ballPos.y >= 1.6 && this.ballPos.y <= 3.4 && !p.isReboundingAnim) {
+        p.isReboundingAnim = true;
+        p.reboundAnimTimer = 0;
+        sounds.playSneakerSqueak();
+      }
+
+      const maxCatchDist = p.isReboundingAnim ? 1.75 : 1.35;
+      const maxCatchY = p.isReboundingAnim ? 3.15 : 2.10;
 
       if (distXZ < maxCatchDist && this.ballPos.y < maxCatchY) {
         this.claimBallPossession(p);
@@ -4448,6 +4931,8 @@ export class BasketballGame {
   }
 
   private claimBallPossession(p: PlayerMesh) {
+    if (this.ballState === 'SHOT' || this.ballState === 'MADE_DROP') return;
+
     // NBA Rule 10, Sec. II: Shooter cannot catch own airball before it touches rim or floor
     if (this.activeShot && !this.activeShot.hasHitRim && !this.activeShot.hasHitFloor && p === this.activeShot.shooter) {
       sounds.playWhistle();
@@ -4468,6 +4953,18 @@ export class BasketballGame {
     this.floorBounceCount = 0;
     this.houPassCount = 0;
     this.houCarrierDribbleTime = 0;
+    this.reboundMarker.visible = false;
+
+    // Reset box-out states on all players
+    this.players.forEach(pl => {
+      pl.isBoxOut = false;
+      pl.boxOutTimer = 0;
+    });
+
+    // Smooth transition flow: Rebounder faces offensive court direction
+    if (!isOffensiveRebound) {
+      p.lookAt(0, p.position.y, p.data.team === 'GSW' ? -13.0 : 13.0);
+    }
 
     // Official NBA Shot Clock rule: 14s on offensive rebound, 24s on defensive rebound
     if (isOffensiveRebound) {
@@ -4491,9 +4988,12 @@ export class BasketballGame {
   }
 
   private executeInbound(team: 'GSW' | 'HOU', spot?: { x: number; z: number }, preferredInbounder?: PlayerMesh) {
+    // Select a big man (PF or C) as the inbound passer so primary ball handler (PG) is on the court
     const inbounder = (preferredInbounder && preferredInbounder.data.team === team)
       ? preferredInbounder
-      : this.players.find(p => p.data.team === team);
+      : this.players.find(p => p.data.team === team && (p.data.position === 'PF' || p.data.position === 'C'))
+      || this.players.find(p => p.data.team === team && p.data.position === 'SF')
+      || this.players.find(p => p.data.team === team);
     if (!inbounder) return;
 
     const isGSW = team === 'GSW';
@@ -4509,25 +5009,27 @@ export class BasketballGame {
 
       const teammates = this.players.filter(p => p.data.team === team && p !== inbounder);
       const tmOffsets = [
-        new THREE.Vector3(spot.x * 0.5, 0, spot.z + courtDir * 2.0),
-        new THREE.Vector3(-spot.x * 0.4, 0, spot.z + courtDir * 3.8),
-        new THREE.Vector3(0, 0, spot.z - courtDir * 2.5),
-        new THREE.Vector3(spot.x * 0.2, 0, spot.z + courtDir * 5.8),
+        new THREE.Vector3(spot.x * 0.5, 0, spot.z + courtDir * 2.2),
+        new THREE.Vector3(-spot.x * 0.4, 0, spot.z + courtDir * 4.2),
+        new THREE.Vector3(0, 0, spot.z - courtDir * 2.8),
+        new THREE.Vector3(spot.x * 0.2, 0, spot.z + courtDir * 6.5),
       ];
       teammates.forEach((tm, idx) => {
         if (tmOffsets[idx]) {
           tm.position.copy(tmOffsets[idx]);
           tm.lookAt(spot.x, 0, spot.z);
           tm.lastPos.copy(tm.position);
+          tm.leftArmPivot.rotation.x = -1.1;
+          tm.rightArmPivot.rotation.x = -1.1;
         }
       });
 
       const opponents = this.players.filter(p => p.data.team !== team);
       const oppOffsets = [
-        new THREE.Vector3(spot.x * 0.65, 0, spot.z + courtDir * 1.8),
-        new THREE.Vector3(spot.x * 0.35, 0, spot.z + courtDir * 3.5),
-        new THREE.Vector3(-spot.x * 0.3, 0, spot.z + courtDir * 4.2),
-        new THREE.Vector3(0, 0, spot.z + courtDir * 6.5),
+        new THREE.Vector3(spot.x * 0.65, 0, spot.z + courtDir * 2.5),
+        new THREE.Vector3(spot.x * 0.35, 0, spot.z + courtDir * 4.5),
+        new THREE.Vector3(-spot.x * 0.3, 0, spot.z + courtDir * 5.2),
+        new THREE.Vector3(0, 0, spot.z + courtDir * 7.5),
         new THREE.Vector3(0, 0, isGSW ? -10.5 : 10.5),
       ];
       opponents.forEach((opp, idx) => {
@@ -4542,30 +5044,43 @@ export class BasketballGame {
       inbounder.position.set(0, 0, baselineZ);
       inbounder.lookAt(0, 0, 0);
 
-      // Space teammates in the backcourt/midcourt ready for inbound play
       const teammates = this.players.filter(p => p.data.team === team && p !== inbounder);
-      const tmOffsets = [
-        new THREE.Vector3(2.4, 0, baselineZ + courtDir * 3.5),
-        new THREE.Vector3(-3.8, 0, baselineZ + courtDir * 5.5),
-        new THREE.Vector3(4.2, 0, baselineZ + courtDir * 7.5),
-        new THREE.Vector3(0, 0, baselineZ + courtDir * 10.5),
+      // Primary receiver (Point Guard e.g. Stephen Curry) flashes directly to backcourt opening
+      const pgReceiver = teammates.find(t => t.data.position === 'PG') || teammates[0];
+      const otherTeammates = teammates.filter(t => t !== pgReceiver);
+
+      if (pgReceiver) {
+        pgReceiver.position.set(0, 0, baselineZ + courtDir * 2.8);
+        pgReceiver.lookAt(inbounder.position.x, 0, inbounder.position.z);
+        pgReceiver.lastPos.copy(pgReceiver.position);
+        pgReceiver.leftArmPivot.rotation.x = -1.25;
+        pgReceiver.rightArmPivot.rotation.x = -1.25;
+      }
+
+      // Space remaining 3 teammates wide across the floor (corners & wings)
+      const spreadOffsets = [
+        new THREE.Vector3(-5.2, 0, baselineZ + courtDir * 4.8),
+        new THREE.Vector3(5.2, 0, baselineZ + courtDir * 4.8),
+        new THREE.Vector3(0, 0, baselineZ + courtDir * 8.5),
       ];
-      teammates.forEach((tm, idx) => {
-        if (tmOffsets[idx]) {
-          tm.position.copy(tmOffsets[idx]);
-          tm.lookAt(0, 0, 0);
+      otherTeammates.forEach((tm, idx) => {
+        if (spreadOffsets[idx]) {
+          tm.position.copy(spreadOffsets[idx]);
+          tm.lookAt(inbounder.position.x, 0, inbounder.position.z);
           tm.lastPos.copy(tm.position);
+          tm.leftArmPivot.rotation.x = -0.9;
+          tm.rightArmPivot.rotation.x = -0.9;
         }
       });
 
-      // Space defending opponents in transition defense
+      // Space defending opponents with realistic cushion (NBA delay-of-game rules)
       const opponents = this.players.filter(p => p.data.team !== team);
       const oppOffsets = [
-        new THREE.Vector3(2.2, 0, baselineZ + courtDir * 5.0),
-        new THREE.Vector3(-3.4, 0, baselineZ + courtDir * 7.0),
-        new THREE.Vector3(3.5, 0, baselineZ + courtDir * 9.5),
-        new THREE.Vector3(-1.8, 0, baselineZ + courtDir * 12.0),
-        new THREE.Vector3(0, 0, baselineZ + courtDir * 15.0),
+        new THREE.Vector3(0, 0, baselineZ + courtDir * 4.4),
+        new THREE.Vector3(-4.2, 0, baselineZ + courtDir * 6.5),
+        new THREE.Vector3(4.2, 0, baselineZ + courtDir * 6.5),
+        new THREE.Vector3(-1.8, 0, baselineZ + courtDir * 10.0),
+        new THREE.Vector3(1.8, 0, baselineZ + courtDir * 13.0),
       ];
       opponents.forEach((opp, idx) => {
         if (oppOffsets[idx]) {
@@ -4594,12 +5109,142 @@ export class BasketballGame {
     this.lastBallTouchedTeam = team;
 
     if (isGSW) {
-      this.setControlledPlayer(inbounder);
+      // User controls Stephen Curry (or primary playmaker), ready to catch and initiate the offense
+      const userReceiver = this.players.find(p => p.data.team === 'GSW' && p.data.name.includes('CURRY'))
+        || this.players.find(p => p.data.team === 'GSW' && p !== inbounder)
+        || inbounder;
+      this.setControlledPlayer(userReceiver);
       this.onPossessionChange?.(true);
     } else {
-      const userDef = this.players.find(p => p.data.team === 'GSW');
+      const userDef = this.players.find(p => p.data.team === 'GSW' && p.data.name.includes('CURRY'))
+        || this.players.find(p => p.data.team === 'GSW');
       if (userDef) this.setControlledPlayer(userDef);
       this.onPossessionChange?.(false);
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // UNIVERSAL MULTI-AGENT FLOOR SPACING & ANTI-BUNCHING ENGINE
+  // --------------------------------------------------------------------------
+  private applyPlayerSpacingAndAntiBunching(dt: number) {
+    if (this.ballState === 'FREE_THROW') return;
+
+    const n = this.players.length;
+
+    // 1. Pairwise Physical Cylinder Contact & Boids Separation Steering (All 10 Players)
+    const CYLINDER_DIAMETER = 0.92; // 0.46m radius athletic body cylinder
+    const BOIDS_AWARENESS_DIST = 1.85; // Predictive avoidance horizon
+
+    for (let i = 0; i < n; i++) {
+      const p1 = this.players[i];
+      for (let j = i + 1; j < n; j++) {
+        const p2 = this.players[j];
+
+        const dx = p1.position.x - p2.position.x;
+        const dz = p1.position.z - p2.position.z;
+        const dist = Math.hypot(dx, dz);
+        if (dist <= 0.0001) continue;
+
+        const nx = dx / dist;
+        const nz = dz / dist;
+        const normal = new THREE.Vector3(nx, 0, nz);
+
+        // A. HARD CYLINDER / CAPSULE COLLISION RESOLUTION (Zero clipping guarantee)
+        if (dist < CYLINDER_DIAMETER) {
+          const overlap = CYLINDER_DIAMETER - dist;
+          const w1 = p1 === this.controlledPlayer ? 0.4 : 0.5;
+          const w2 = p2 === this.controlledPlayer ? 0.4 : 0.5;
+
+          // Non-penetration positional push
+          p1.position.addScaledVector(normal, overlap * w1);
+          p2.position.addScaledVector(normal, -overlap * w2);
+
+          // Physical velocity impulse: Remove relative momentum pushing into each other
+          if (p1.velocity && p2.velocity) {
+            const relVel = p1.velocity.clone().sub(p2.velocity);
+            const vDotN = relVel.dot(normal);
+            if (vDotN < 0) {
+              const impulse = -vDotN * 0.75;
+              p1.velocity.addScaledVector(normal, impulse * w1);
+              p2.velocity.addScaledVector(normal, -impulse * w2);
+            }
+          }
+        } else if (dist < BOIDS_AWARENESS_DIST) {
+          // B. BOIDS PREDICTIVE SEPARATION STEERING
+          // Smooth steering repulsion curves players around obstacles naturally
+          const steerWeight = Math.pow((BOIDS_AWARENESS_DIST - dist) / BOIDS_AWARENESS_DIST, 2.0);
+          const isSameTeam = p1.data.team === p2.data.team;
+          const steerMag = steerWeight * (isSameTeam ? 3.4 : 2.0) * dt;
+
+          p1.position.addScaledVector(normal, steerMag * 0.5);
+          p2.position.addScaledVector(normal, -steerMag * 0.5);
+
+          if (p1.velocity && p2.velocity) {
+            p1.velocity.addScaledVector(normal, steerMag * 0.8);
+            p2.velocity.addScaledVector(normal, -steerMag * 0.8);
+          }
+        }
+      }
+    }
+
+    // 2. Ball-Handler Clear-Out Spacing Bubble:
+    // Prevents teammates from crowding into the carrier's isolation/driving lane (3.2m radius)
+    if (this.ballHolder && this.ballState === 'DRIBBLE') {
+      const carrier = this.ballHolder;
+      for (let i = 0; i < n; i++) {
+        const p = this.players[i];
+        if (p === carrier) continue;
+        const cdx = p.position.x - carrier.position.x;
+        const cdz = p.position.z - carrier.position.z;
+        const distToCarrier = Math.hypot(cdx, cdz);
+        const isTeammate = p.data.team === carrier.data.team;
+        // Teammates must stay >= 3.2m away; non-primary defenders maintain >= 1.6m
+        const requiredClearance = isTeammate ? 3.2 : 1.35;
+
+        if (distToCarrier < requiredClearance && distToCarrier > 0.001) {
+          const pushForce = (requiredClearance - distToCarrier) * (isTeammate ? 3.2 : 1.8) * dt;
+          p.position.x += (cdx / distToCarrier) * pushForce;
+          p.position.z += (cdz / distToCarrier) * pushForce;
+        }
+      }
+    }
+
+    // 2. Paint Density Limiter (Max 3 players in the restricted area / low paint)
+    // Prevents the 10-player traffic jam under the hoop!
+    const hoops = [this.gswHoopPos, this.houHoopPos];
+    for (const hoop of hoops) {
+      const playersNearRim = this.players.filter(p => {
+        return Math.hypot(p.position.x - hoop.x, p.position.z - hoop.z) < 2.5;
+      });
+
+      if (playersNearRim.length > 3) {
+        // Keep the closest 2 big men / rebounders, push guards and extra players out to the perimeter
+        playersNearRim.sort((a, b) => {
+          const isBigA = a.data.position === 'C' || a.data.position === 'PF' ? 1 : 0;
+          const isBigB = b.data.position === 'C' || b.data.position === 'PF' ? 1 : 0;
+          return isBigB - isBigA;
+        });
+
+        for (let k = 3; k < playersNearRim.length; k++) {
+          const excessPlayer = playersNearRim[k];
+          if (excessPlayer === this.controlledPlayer || excessPlayer === this.ballHolder) continue;
+          const outDir = new THREE.Vector3(
+            excessPlayer.position.x - hoop.x || (Math.random() - 0.5),
+            0,
+            excessPlayer.position.z - hoop.z || (hoop.z < 0 ? 1 : -1)
+          ).normalize();
+          excessPlayer.position.addScaledVector(outDir, excessPlayer.data.speed * 1.5 * dt);
+        }
+      }
+    }
+
+    // 3. Keep all 10 players clamped within official playable court boundary
+    const courtLimitX = 7.05;
+    const courtLimitZ = 13.68;
+    for (const p of this.players) {
+      if (this.isInboundPlay && p === this.ballHolder) continue;
+      p.position.x = THREE.MathUtils.clamp(p.position.x, -courtLimitX, courtLimitX);
+      p.position.z = THREE.MathUtils.clamp(p.position.z, -courtLimitZ, courtLimitZ);
     }
   }
 
@@ -4609,12 +5254,22 @@ export class BasketballGame {
   private checkOfficialNBARules(dt: number) {
     if (this.ballState === 'FREE_THROW') return;
 
-    // 1. INBOUND 5-SECOND VIOLATION
+    // 1. INBOUND 5-SECOND VIOLATION & AUTO-PASS DELIVERY
     if (this.isInboundPlay && this.ballHolder) {
       this.inboundTimer += dt;
       if (Math.abs(this.ballHolder.position.z) < 13.5) {
         this.isInboundPlay = false;
         this.inboundTimer = 0;
+      } else if (this.ballHolder !== this.controlledPlayer && this.ballHolder.data.team === 'GSW' && this.controlledPlayer.data.team === 'GSW') {
+        // AI teammate inbounds cleanly to the user's controlled point guard within 0.85s!
+        if (this.inboundTimer > 0.85) {
+          const passer = this.ballHolder;
+          const target = this.controlledPlayer;
+          this.isInboundPlay = false;
+          this.inboundTimer = 0;
+          this.initiatePass(passer, target);
+          return;
+        }
       } else if (this.inboundTimer >= 5.0) {
         sounds.playWhistle();
         const defendingTeam = this.ballHolder.data.team === 'GSW' ? 'HOU' : 'GSW';
@@ -4763,30 +5418,31 @@ export class BasketballGame {
     this.gswHoopGroup.visible = true;
     this.houHoopGroup.visible = true;
 
-    // 1. FREE THROW BROADCAST PERSPECTIVE (Directly behind the shooter facing rim)
-    if (this.ballState === 'FREE_THROW' && this.activeFoul) {
+    // Detect state changes into or out of FREE_THROW to trigger smooth camera tween/pan
+    const isFT = this.ballState === 'FREE_THROW' && !!this.activeFoul;
+    if (isFT !== this.wasFreeThrow) {
+      this.cameraFromPos.copy(this.camera.position);
+      this.cameraFromLook.copy(this.cameraCurrentLook);
+      this.cameraTweenProgress = 0.0;
+      this.wasFreeThrow = isFT;
+    }
+
+    // 1. FREE THROW BROADCAST PERSPECTIVE (Authentic 2K over-the-shoulder view facing rim)
+    if (isFT && this.activeFoul) {
       if (this.nameplateSprite) this.nameplateSprite.visible = false;
       if (this.playerFloorRing) this.playerFloorRing.visible = false;
 
       const shooter = this.activeFoul.fouledPlayer;
       const isGSW = shooter.data.team === 'GSW';
       const rimZ = isGSW ? -13.0 : 13.0;
-      const camZ = isGSW ? shooter.position.z + 4.35 : shooter.position.z - 4.35;
-      const camY = 3.35;
-      const camX = shooter.position.x * 0.35;
+      // Position camera directly behind shooter's right shoulder, elevated to frame the basket cleanly
+      const camZ = isGSW ? shooter.position.z + 2.75 : shooter.position.z - 2.75;
+      const camY = 2.45;
+      const camX = isGSW ? 0.38 : -0.38;
 
       this.cameraTargetPos.set(camX, camY, camZ);
-      this.cameraLookTarget.set(0, 2.9, rimZ);
-
-      const followSpeed = dt * 6.5;
-      this.camera.position.lerp(this.cameraTargetPos, followSpeed);
-      this.cameraCurrentLook.lerp(this.cameraLookTarget, followSpeed);
-      this.camera.lookAt(this.cameraCurrentLook);
-      return;
-    }
-
-    // 1B. NBA INJURY & TACTICAL SUBSTITUTION BROADCAST CAMERA
-    if (this.ballState === 'INJURY_SUB' && this.activeInjuryState) {
+      this.cameraLookTarget.set(0, 3.02, rimZ);
+    } else if (this.ballState === 'INJURY_SUB' && this.activeInjuryState) {
       if (this.nameplateSprite) this.nameplateSprite.visible = false;
       if (this.playerFloorRing) this.playerFloorRing.visible = false;
 
@@ -4811,68 +5467,51 @@ export class BasketballGame {
         this.cameraTargetPos.set(s.benchSidelinePos.x + offsetX, 2.5, s.courtTargetPos.z + 3.2);
         this.cameraLookTarget.set(s.benchSidelinePos.x * 0.5 + s.courtTargetPos.x * 0.5, 1.4, s.courtTargetPos.z);
       }
-
-      const followSpeed = dt * 4.5;
-      this.camera.position.lerp(this.cameraTargetPos, followSpeed);
-      this.cameraCurrentLook.lerp(this.cameraLookTarget, followSpeed);
-      this.camera.lookAt(this.cameraCurrentLook);
-      return;
-    }
-
-    const focusPlayer = this.controlledPlayer;
-    let targetX = focusPlayer.position.x;
-    let targetZ = focusPlayer.position.z;
-
-    if (this.ballState === 'SHOT' || this.ballState === 'REBOUND') {
-      targetX = focusPlayer.position.x * 0.35 + this.ballPos.x * 0.65;
-      targetZ = focusPlayer.position.z * 0.35 + this.ballPos.z * 0.65;
-    }
-
-    if (this.cameraMode === 'SIDE') {
-      // Classic TV Sideline Broadcast View (Authentic horizontal court perspective)
-      const camX = 14.8;
-      const camY = 7.6;
-      const camZ = THREE.MathUtils.clamp(targetZ * 0.68, -8.5, 8.5);
-
-      const lookX = targetX * 0.2;
-      const lookY = 1.6 + (this.ballState === 'SHOT' ? Math.max(0, (this.ballPos.y - 2.0) * 0.3) : 0);
-      const lookZ = targetZ;
-
-      this.cameraTargetPos.set(camX, camY, camZ);
-      this.cameraLookTarget.set(lookX, lookY, lookZ);
-    } else if (this.cameraMode === 'COURTSIDE') {
-      // Intimate, dynamic courtside side view right off the hardwood
-      const camX = 10.5;
-      const camY = 4.2;
-      const camZ = THREE.MathUtils.clamp(targetZ * 0.75, -9.0, 9.0);
-
-      const lookX = targetX * 0.15;
-      const lookY = 1.5;
-      const lookZ = targetZ;
-
-      this.cameraTargetPos.set(camX, camY, camZ);
-      this.cameraLookTarget.set(lookX, lookY, lookZ);
     } else {
-      // 2K Drive (Behind player end-to-end follow)
-      const isGswPossession = !this.ballHolder || this.ballHolder.data.team === 'GSW';
-      if (isGswPossession) {
-        const camX = targetX * 0.82;
-        const camZ = THREE.MathUtils.clamp(targetZ + 7.5, -6.5, 14.2);
-        const camY = 6.8;
+      const focusPlayer = this.controlledPlayer;
+      let targetX = focusPlayer.position.x;
+      let targetZ = focusPlayer.position.z;
 
-        const lookX = targetX * 0.65;
-        const lookZ = targetZ - 2.8;
-        const lookY = 1.6;
+      if (this.ballState === 'SHOT' || this.ballState === 'REBOUND') {
+        targetX = focusPlayer.position.x * 0.35 + this.ballPos.x * 0.65;
+        targetZ = focusPlayer.position.z * 0.35 + this.ballPos.z * 0.65;
+      }
+
+      if (this.cameraMode === 'SIDE') {
+        // Classic TV Sideline Broadcast View (Authentic horizontal court perspective)
+        const camX = 14.8;
+        const camY = 7.6;
+        const camZ = THREE.MathUtils.clamp(targetZ * 0.68, -8.5, 8.5);
+
+        const lookX = targetX * 0.2;
+        const lookY = 1.6 + (this.ballState === 'SHOT' ? Math.max(0, (this.ballPos.y - 2.0) * 0.3) : 0);
+        const lookZ = targetZ;
+
+        this.cameraTargetPos.set(camX, camY, camZ);
+        this.cameraLookTarget.set(lookX, lookY, lookZ);
+      } else if (this.cameraMode === 'COURTSIDE') {
+        // Intimate, dynamic courtside side view right off the hardwood
+        const camX = 10.5;
+        const camY = 4.2;
+        const camZ = THREE.MathUtils.clamp(targetZ * 0.75, -9.0, 9.0);
+
+        const lookX = targetX * 0.15;
+        const lookY = 1.5;
+        const lookZ = targetZ;
 
         this.cameraTargetPos.set(camX, camY, camZ);
         this.cameraLookTarget.set(lookX, lookY, lookZ);
       } else {
+        // 2K Drive (Behind player end-to-end follow)
+        const isGswPossession = !this.ballHolder || this.ballHolder.data.team === 'GSW';
         const camX = targetX * 0.82;
-        const camZ = THREE.MathUtils.clamp(targetZ - 7.5, -14.2, 6.5);
+        const camZ = isGswPossession
+          ? THREE.MathUtils.clamp(targetZ + 7.5, -6.5, 14.2)
+          : THREE.MathUtils.clamp(targetZ - 7.5, -14.2, 6.5);
         const camY = 6.8;
 
         const lookX = targetX * 0.65;
-        const lookZ = targetZ + 2.8;
+        const lookZ = isGswPossession ? targetZ - 2.8 : targetZ + 2.8;
         const lookY = 1.6;
 
         this.cameraTargetPos.set(camX, camY, camZ);
@@ -4880,30 +5519,173 @@ export class BasketballGame {
       }
     }
 
-    const followSpeed = dt * 5.8;
+    // 2. Cinematic Camera Tween (Curved Orbital Crane Pan & Tilt across Free Throw boundaries)
+    if (this.cameraTweenProgress < 1.0) {
+      this.cameraTweenProgress = Math.min(1.0, this.cameraTweenProgress + dt / this.cameraTweenDuration);
+      const t = this.cameraTweenProgress;
+      // Perlin smootherstep: zero 1st and 2nd derivatives at endpoints for silky-smooth motion
+      const ease = t * t * t * (t * (6 * t - 15) + 10);
+
+      // Arc/crane trajectory maintaining visual orientation of court & basket
+      if (isFT) {
+        // Sweeping from Sideline Broadcast into Free Throw line behind shooter:
+        // Hold upper broadcast altitude through the turn, then sweep cleanly behind shooter's shoulder
+        const midX = this.cameraFromPos.x * 0.60 + this.cameraTargetPos.x * 0.40;
+        const midY = Math.max(this.cameraFromPos.y, 6.4);
+        const midZ = this.cameraFromPos.z * 0.45 + this.cameraTargetPos.z * 0.55;
+        const inv = 1 - ease;
+
+        this.camera.position.set(
+          inv * inv * this.cameraFromPos.x + 2 * inv * ease * midX + ease * ease * this.cameraTargetPos.x,
+          inv * inv * this.cameraFromPos.y + 2 * inv * ease * midY + ease * ease * this.cameraTargetPos.y,
+          inv * inv * this.cameraFromPos.z + 2 * inv * ease * midZ + ease * ease * this.cameraTargetPos.z
+        );
+      } else {
+        // Sweeping from Free Throw line back to Sideline Broadcast:
+        // Crane upward and arc back to the broadcast perch, keeping the floor in continuous orientation
+        const midX = this.cameraTargetPos.x * 0.50 + 3.5;
+        const midY = Math.max(this.cameraTargetPos.y, 6.8);
+        const midZ = this.cameraFromPos.z * 0.35 + this.cameraTargetPos.z * 0.65;
+        const inv = 1 - ease;
+
+        this.camera.position.set(
+          inv * inv * this.cameraFromPos.x + 2 * inv * ease * midX + ease * ease * this.cameraTargetPos.x,
+          inv * inv * this.cameraFromPos.y + 2 * inv * ease * midY + ease * ease * this.cameraTargetPos.y,
+          inv * inv * this.cameraFromPos.z + 2 * inv * ease * midZ + ease * ease * this.cameraTargetPos.z
+        );
+      }
+
+      this.cameraCurrentLook.lerpVectors(this.cameraFromLook, this.cameraLookTarget, ease);
+      this.camera.lookAt(this.cameraCurrentLook);
+      return;
+    }
+
+    const followSpeed = dt * (isFT ? 7.5 : 5.8);
     this.camera.position.lerp(this.cameraTargetPos, followSpeed);
     this.cameraCurrentLook.lerp(this.cameraLookTarget, followSpeed);
     this.camera.lookAt(this.cameraCurrentLook);
   }
 
   // --------------------------------------------------------------------------
-  // NET ANIMATION & VISUAL FX
+  // NET VERTEX ANIMATION & SCORE REACTION PHYSICS
   // --------------------------------------------------------------------------
-  private updateNetAnimation(dt: number) {
-    if (this.gswNetWobble > 0) {
-      this.gswNetWobble = Math.max(0, this.gswNetWobble - dt);
-      const wobble = Math.sin(this.gswNetWobble * 30) * (this.gswNetWobble / 0.35) * 0.28;
-      this.gswNetMesh.scale.set(1 + wobble, 1 - wobble * 0.5, 1 + wobble);
-    } else {
-      this.gswNetMesh.scale.set(1, 1, 1);
+  private setNetBallInside(hoopKey: 'gsw' | 'hou', inside: boolean, worldY = 0) {
+    const state = hoopKey === 'gsw' ? this.gswNetState : this.houNetState;
+    if (!state) return;
+    state.ballInside = inside;
+    if (inside) {
+      // Net mesh center is at this.RIM_HEIGHT - 0.24 (2.81m)
+      state.ballLocalY = worldY - (this.RIM_HEIGHT - 0.24);
     }
+  }
 
-    if (this.houNetWobble > 0) {
-      this.houNetWobble = Math.max(0, this.houNetWobble - dt);
-      const wobble = Math.sin(this.houNetWobble * 30) * (this.houNetWobble / 0.35) * 0.28;
-      this.houNetMesh.scale.set(1 + wobble, 1 - wobble * 0.5, 1 + wobble);
+  private triggerNetReaction(hoopKey: 'gsw' | 'hou', intensity = 0.9, incomingVel?: THREE.Vector3) {
+    const state = hoopKey === 'gsw' ? this.gswNetState : this.houNetState;
+    if (!state) return;
+    state.ballInside = false;
+    state.reactionTimer = 0;
+    state.reactionDuration = 1.15;
+    state.intensity = intensity;
+    if (incomingVel && incomingVel.lengthSq() > 0.05) {
+      state.reactionDir.set(incomingVel.x, 0, incomingVel.z).normalize();
     } else {
-      this.houNetMesh.scale.set(1, 1, 1);
+      state.reactionDir.set(0, 0, hoopKey === 'gsw' ? -1 : 1);
+    }
+  }
+
+  private updateNetAnimation(dt: number) {
+    const states = [this.gswNetState, this.houNetState];
+
+    for (const state of states) {
+      if (!state || !state.mesh) continue;
+
+      const isActive = state.ballInside || state.reactionTimer < state.reactionDuration;
+
+      if (!isActive) {
+        if (state.needsReset) {
+          const geo = state.mesh.geometry as THREE.BufferGeometry;
+          const posAttr = geo.attributes.position as THREE.BufferAttribute;
+          posAttr.array.set(state.basePositions);
+          posAttr.needsUpdate = true;
+          geo.computeVertexNormals();
+          state.needsReset = false;
+        }
+        continue;
+      }
+
+      state.reactionTimer += dt;
+      state.needsReset = true;
+
+      const geo = state.mesh.geometry as THREE.BufferGeometry;
+      const posAttr = geo.attributes.position as THREE.BufferAttribute;
+      const base = state.basePositions;
+      const count = posAttr.count;
+
+      const t = state.reactionTimer;
+      const damp = Math.exp(-3.4 * t) * state.intensity;
+      const isWaveActive = t < state.reactionDuration;
+
+      for (let i = 0; i < count; i++) {
+        const x0 = base[i * 3];
+        const y0 = base[i * 3 + 1];
+        const z0 = base[i * 3 + 2];
+
+        // Net vertical span is from +0.24 (top/rim) to -0.24 (bottom opening)
+        // v = 0 at the rim hooks, v = 1.0 at the bottom hem
+        const v = THREE.MathUtils.clamp((0.24 - y0) / 0.48, 0, 1);
+
+        // Top vertices (v = 0) are rigidly hooked to the metal rim: pinWeight = 0 at top
+        const pinWeight = Math.sin(v * Math.PI * 0.5);
+
+        const r0 = Math.hypot(x0, z0) || 0.001;
+        const nx = x0 / r0;
+        const nz = z0 / r0;
+
+        let dx = 0;
+        let dy = 0;
+        let dz = 0;
+
+        // 1. Dynamic 3D outward bulge as ball slides down through the tapered net throat
+        if (state.ballInside) {
+          const distY = y0 - state.ballLocalY;
+          const ballR = this.BALL_RADIUS * 1.03; // ~0.123m
+          if (Math.abs(distY) < ballR) {
+            const crossR = Math.sqrt(ballR * ballR - distY * distY);
+            if (crossR > r0 * 0.95) {
+              const bulge = (crossR - r0 * 0.95) * pinWeight;
+              dx += nx * bulge;
+              dz += nz * bulge;
+            }
+          }
+          // Downward drag on the net fabric while ball is pushing through
+          dy -= 0.038 * Math.exp(-((distY * 12.0) ** 2)) * pinWeight;
+        }
+
+        // 2. Swish pop & downward traveling harmonic wave reaction upon ball exit
+        if (isWaveActive) {
+          // Downward ripple wave traveling through vertical segments
+          const wavePhase = t * 24.0 - v * 7.2;
+          const wave = Math.sin(wavePhase) * damp * pinWeight;
+
+          // Radial flutter and snap of the bottom hem
+          const snapEnvelope = Math.sin(t * 16.0) * Math.exp(-4.2 * t) * (v * v) * 0.08 * state.intensity;
+
+          dx += nx * (wave * 0.04 + snapEnvelope);
+          dz += nz * (wave * 0.04 + snapEnvelope);
+
+          // Directional momentum push
+          dx += state.reactionDir.x * wave * 0.065;
+          dz += state.reactionDir.z * wave * 0.065;
+
+          // Vertical elastic rebound
+          dy += Math.cos(wavePhase) * damp * 0.025 * pinWeight;
+        }
+
+        posAttr.setXYZ(i, x0 + dx, y0 + dy, z0 + dz);
+      }
+
+      posAttr.needsUpdate = true;
+      geo.computeVertexNormals();
     }
   }
 
@@ -5117,32 +5899,132 @@ export class BasketballGame {
       }
 
       // -----------------------------------------------------------------------
-      // TACTIC B: 5-OUT CORNER SPACING & DRIVE-AND-KICK
+      // TACTIC B: 5-OUT & 4-OUT/1-IN RIGID ANCHORS & BEHAVIOR TREE (HOUSTON ATTACKS POSITIVE Z)
       // -----------------------------------------------------------------------
-      const offBallSpots: Record<string, THREE.Vector3> = {
-        PG: new THREE.Vector3(0, 0, 5.0),
-        SG: new THREE.Vector3(-5.4, 0, 9.2),  // Left corner / wing 3
-        SF: new THREE.Vector3(5.4, 0, 9.2),   // Right corner / wing 3
-        PF: new THREE.Vector3(-4.6, 0, 6.4),  // Left slot 3
-        C: new THREE.Vector3(4.6, 0, 6.4),    // Right slot 3
-      };
+      const houAnchors = [
+        { id: 'TOP', pos: new THREE.Vector3(0.0, 0, 6.6) },
+        { id: 'LEFT_WING', pos: new THREE.Vector3(-5.3, 0, 8.6) },
+        { id: 'RIGHT_WING', pos: new THREE.Vector3(5.3, 0, 8.6) },
+        { id: 'LEFT_CORNER', pos: new THREE.Vector3(-6.3, 0, 12.4) },
+        { id: 'RIGHT_CORNER', pos: new THREE.Vector3(6.3, 0, 12.4) },
+      ];
+      const houDunker = new THREE.Vector3(2.4, 0, 11.6);
 
-      houPlayers.forEach(p => {
-        if (p === carrier || p === this.houScreener) return;
-        const base = offBallSpots[p.data.position] || new THREE.Vector3(p.position.x > 0 ? 5.2 : -5.2, 0, 8.5);
-        const sway = Math.sin(this.gameClock * 2.2 + p.position.x) * 0.35;
-        const target = new THREE.Vector3(base.x + sway, 0, base.z);
+      let houCarrierAnchorId = 'TOP';
+      let minHCDist = 999;
+      houAnchors.forEach(a => {
+        const d = a.pos.distanceTo(carrier.position);
+        if (d < minHCDist) {
+          minHCDist = d;
+          houCarrierAnchorId = a.id;
+        }
+      });
+      const openHouAnchors = houAnchors.filter(a => a.id !== houCarrierAnchorId);
 
-        // Relocate away from carrier's driving lane to clear driving space
-        if (target.distanceTo(carrier.position) < 2.2) {
-          target.x = target.x > 0 ? target.x + 1.2 : target.x - 1.2;
+      const offBallHou = houPlayers.filter(p => p !== carrier && p !== this.houScreener);
+      offBallHou.forEach((p, idx) => {
+        p.offBallTimer = (p.offBallTimer || 0) + dt;
+        if (!p.offBallAction) p.offBallAction = 'SPACING';
+
+        const cyclePeriod = 4.2;
+        const phase = (this.gameClock + idx * 1.05) % cyclePeriod;
+
+        if (p.offBallAction === 'SPACING' && phase < dt * 1.5) {
+          const rand = Math.random();
+          if (rand < 0.35 && (p.data.position === 'SG' || p.data.position === 'SF')) {
+            p.offBallAction = 'BACKDOOR_CUT';
+            p.offBallTimer = 0;
+            const cutX = p.position.x > 0 ? 1.5 : -1.5;
+            p.offBallTargetPos = new THREE.Vector3(cutX, 0, targetRim.z - 1.6);
+          } else if (rand < 0.65 && (p.data.position === 'PF' || p.data.position === 'C')) {
+            p.offBallAction = 'FLARE_SCREEN';
+            p.offBallTimer = 0;
+            const wingPartner = offBallHou.find(t => t.data.position === 'SG' || t.data.position === 'SF');
+            p.offBallPartner = wingPartner || null;
+            const screenX = wingPartner ? wingPartner.position.x * 0.65 : (p.position.x > 0 ? 3.0 : -3.0);
+            p.offBallTargetPos = new THREE.Vector3(screenX, 0, 8.2);
+          } else if (rand < 0.90) {
+            p.offBallAction = 'BASELINE_RELOCATE';
+            p.offBallTimer = 0;
+            const newX = p.position.x > 0 ? -6.2 : 6.2;
+            p.offBallTargetPos = new THREE.Vector3(newX, 0, 12.3);
+          }
         }
 
-        const toTarget = new THREE.Vector3().subVectors(target, p.position);
+        if (p.offBallAction === 'BACKDOOR_CUT') {
+          const target = p.offBallTargetPos || targetRim;
+          const toCut = new THREE.Vector3().subVectors(target, p.position);
+          toCut.y = 0;
+          if (toCut.length() > 0.3) {
+            toCut.normalize();
+            p.position.addScaledVector(toCut, p.data.speed * 1.25 * dt);
+          }
+          p.lookAt(targetRim.x, p.position.y, targetRim.z);
+          p.leftArmPivot.rotation.x = -1.45;
+          p.rightArmPivot.rotation.x = -1.45;
+          if (p.offBallTimer > 1.5) {
+            p.offBallAction = 'SPACING';
+            p.offBallTimer = 0;
+          }
+          return;
+        }
+
+        if (p.offBallAction === 'FLARE_SCREEN') {
+          const target = p.offBallTargetPos || new THREE.Vector3(2.8, 0, 8.0);
+          const toScreen = new THREE.Vector3().subVectors(target, p.position);
+          toScreen.y = 0;
+          if (toScreen.length() > 0.25) {
+            toScreen.normalize();
+            p.position.addScaledVector(toScreen, p.data.speed * 1.05 * dt);
+            p.isScreenAnim = false;
+          } else {
+            p.isScreenAnim = true;
+          }
+          p.lookAt(carrier.position.x, p.position.y, carrier.position.z);
+          if (p.offBallTimer > 2.2) {
+            p.isScreenAnim = false;
+            p.offBallAction = 'SPACING';
+            p.offBallTimer = 0;
+          }
+          return;
+        }
+
+        if (p.offBallAction === 'BASELINE_RELOCATE') {
+          const target = p.offBallTargetPos || new THREE.Vector3(p.position.x > 0 ? -6.2 : 6.2, 0, 12.3);
+          const toRelocate = new THREE.Vector3().subVectors(target, p.position);
+          toRelocate.y = 0;
+          if (toRelocate.length() > 0.3) {
+            toRelocate.normalize();
+            p.position.addScaledVector(toRelocate, p.data.speed * 1.15 * dt);
+          }
+          p.lookAt(carrier.position.x, p.position.y, carrier.position.z);
+          p.leftArmPivot.rotation.x = -1.2;
+          p.rightArmPivot.rotation.x = -1.2;
+          if (p.offBallTimer > 1.8) {
+            p.offBallAction = 'SPACING';
+            p.offBallTimer = 0;
+          }
+          return;
+        }
+
+        // DEFAULT: RIGID ANCHOR HOLD
+        let anchorPos = openHouAnchors[idx % openHouAnchors.length].pos;
+        if (p.data.position === 'C') anchorPos = houDunker;
+        const targetPos = anchorPos.clone();
+        if (carrier.position.z > 7.5) {
+          if (p.data.position === 'SG') targetPos.set(-6.2, 0, 12.3);
+          else if (p.data.position === 'SF') targetPos.set(6.2, 0, 12.3);
+          else if (p.data.position === 'PF') targetPos.set(0.0, 0, 6.6);
+        } else {
+          const sway = Math.sin(this.gameClock * 2.0 + idx) * 0.22;
+          targetPos.x += sway;
+        }
+
+        const toTarget = new THREE.Vector3().subVectors(targetPos, p.position);
         toTarget.y = 0;
-        if (toTarget.length() > 0.3) {
+        if (toTarget.length() > 0.25) {
           toTarget.normalize();
-          p.position.addScaledVector(toTarget, p.data.speed * 0.90 * dt);
+          p.position.addScaledVector(toTarget, p.data.speed * 0.95 * dt);
         }
         p.lookAt(carrier.position.x, p.position.y, carrier.position.z);
       });
@@ -5231,7 +6113,9 @@ export class BasketballGame {
       if ((isPerimeterOpen || isMidRangeOpen || clockExpiring) && this.ballState === 'DRIBBLE') {
         this.houCarrierDribbleTime = 0;
         this.aiDecisionTimer = 0;
-        this.executeShot(carrier, 0.65);
+        const aiTimingSpread = (defDist < 1.8 ? 0.16 : 0.08) * (1 - (carrier.data.threePointRating / 100) * 0.4);
+        const aiHold = 0.65 + (Math.random() - 0.5) * aiTimingSpread;
+        this.executeShot(carrier, aiHold);
         return;
       }
 
@@ -5443,29 +6327,15 @@ export class BasketballGame {
         }
 
         // -------------------------------------------------------------------
-        // ROLE 3: OFF-BALL HELP, TRAPS & DENIAL (BALL-YOU-MAN TRIANGLE)
+        // ROLE 3: OFF-BALL PERIMETER SPACING & PASSING LANE DENIAL (ANTI-SCRUM)
         // -------------------------------------------------------------------
-        // DOUBLE TEAM TRAP: If user penetrates into the paint or holds ball in prolonged isolation
-        const shouldDouble = (distCarrierToHoop < 5.0 || this.controlledPlayer.idleTimer > 2.5) && !this.isInboundPlay;
-        const isDoubleTeamer = shouldDouble && !isPrimaryDefender && p.position.distanceTo(gswCarrier.position) < 3.2;
-
-        if (isDoubleTeamer) {
-          const toCarrier = new THREE.Vector3().subVectors(gswCarrier.position, p.position);
-          toCarrier.y = 0;
-          if (toCarrier.length() > 0.8) {
-            toCarrier.normalize();
-            p.position.addScaledVector(toCarrier, p.data.speed * 1.15 * dt);
-          }
+        // Defenders stay strictly mapped to their matchup unless carrier enters low restricted paint (< 2.5m)
+        const isCarrierAtRim = distCarrierToHoop < 2.5;
+        if (isCarrierAtRim && !isPrimaryDefender && p.position.distanceTo(this.gswHoopPos) < 2.8) {
+          // Only the rim protector/help big contests at the immediate rim
           p.lookAt(gswCarrier.position.x, p.position.y, gswCarrier.position.z);
           p.leftArmPivot.rotation.x = -1.5;
           p.rightArmPivot.rotation.x = -1.5;
-          p.leftArmPivot.rotation.z = -0.3;
-          p.rightArmPivot.rotation.z = 0.3;
-
-          if (this.houDoubleTeamTimer <= 0) {
-            this.houDoubleTeamTimer = 3.5;
-            this.spawnFloatingStatus('DOUBLE TEAM TRAP!', gswCarrier.position, '#ce1141');
-          }
           return;
         }
 
@@ -5716,61 +6586,96 @@ export class BasketballGame {
       const user = this.ballHolder;
       const targetRim = this.gswHoopPos;
 
-      // Authentic Golden State Motion Offense Base Spots:
-      // SG (Klay): Left Wing / Corner
-      // SF (Wiggins): Right Wing / Corner
-      // PF (Draymond): High Post / Screen Partner
-      // C (Looney): Low Block / Dunker Spot
-      const offBallSpots: Record<string, THREE.Vector3> = {
-        SG: new THREE.Vector3(-5.2, 0, -8.2),
-        SF: new THREE.Vector3(5.2, 0, -8.2),
-        PF: new THREE.Vector3(-0.6, 0, -6.4),
-        C: new THREE.Vector3(2.4, 0, -11.2),
-      };
+      // ----------------------------------------------------------------------
+      // 1. STANDARD NBA 5-OUT & 4-OUT/1-IN RIGID SPACING ANCHOR NODES
+      // ----------------------------------------------------------------------
+      // Court anchor nodes spread along the perimeter arc and corners (z: -13.0 rim)
+      const perimeterAnchors = [
+        { id: 'TOP', pos: new THREE.Vector3(0.0, 0, -6.6) },
+        { id: 'LEFT_WING', pos: new THREE.Vector3(-5.3, 0, -8.6) },
+        { id: 'RIGHT_WING', pos: new THREE.Vector3(5.3, 0, -8.6) },
+        { id: 'LEFT_CORNER', pos: new THREE.Vector3(-6.3, 0, -12.4) },
+        { id: 'RIGHT_CORNER', pos: new THREE.Vector3(6.3, 0, -12.4) },
+      ];
+      const dunkerSpot = new THREE.Vector3(2.4, 0, -11.6);
 
-      // Check if user is trapped by Houston defenders (distance < 1.4m)
-      const userDefender = this.getNearestDefender(user);
-      const isUserTrapped = userDefender ? userDefender.position.distanceTo(user.position) < 1.35 : false;
-
-      // Find closest teammate to provide emergency safety valve pass option
-      let closestTeammate: PlayerMesh = gswTeammates[0];
-      let minTmDist = 999;
-      gswTeammates.forEach(tm => {
-        const d = tm.position.distanceTo(user.position);
-        if (d < minTmDist) {
-          minTmDist = d;
-          closestTeammate = tm;
+      // Identify which anchor node the ball carrier occupies
+      let carrierAnchorId = 'TOP';
+      let minCarrierDist = 999;
+      perimeterAnchors.forEach(a => {
+        const d = a.pos.distanceTo(user.position);
+        if (d < minCarrierDist) {
+          minCarrierDist = d;
+          carrierAnchorId = a.id;
         }
       });
 
-      gswTeammates.forEach(p => {
+      // The other 4 teammates occupy the remaining 4 unique anchor nodes
+      const availableAnchors = perimeterAnchors.filter(a => a.id !== carrierAnchorId);
+
+      // Assign each teammate to a distinct anchor node based on role & index
+      gswTeammates.forEach((p, idx) => {
         if (p.isDunking || p.isShootingAnim) return;
 
-        // A. EMERGENCY OUTLET PASS: Flash toward trapped ball carrier
-        if (isUserTrapped && p === closestTeammate) {
-          const toUser = new THREE.Vector3().subVectors(user.position, p.position);
-          toUser.y = 0;
-          const dist = toUser.length();
-          if (dist > 2.6) {
-            toUser.normalize();
-            p.position.addScaledVector(toUser, p.data.speed * 1.12 * dt);
+        p.offBallTimer = (p.offBallTimer || 0) + dt;
+        if (!p.offBallAction) p.offBallAction = 'SPACING';
+
+        // Staggered off-ball AI behavior tree triggers every 4.0s (offset per player)
+        const cyclePeriod = 4.0;
+        const playerPhase = (this.gameClock + idx * 1.0) % cyclePeriod;
+
+        if (p.offBallAction === 'SPACING' && playerPhase < dt * 1.5) {
+          const rand = Math.random();
+          if (rand < 0.35 && (p.data.position === 'SG' || p.data.position === 'SF')) {
+            // BEHAVIOR 1: BACKDOOR CUT TO THE RIM
+            p.offBallAction = 'BACKDOOR_CUT';
+            p.offBallTimer = 0;
+            const cutSideX = p.position.x > 0 ? 1.5 : -1.5;
+            p.offBallTargetPos = new THREE.Vector3(cutSideX, 0, targetRim.z + 1.6);
+          } else if (rand < 0.65 && (p.data.position === 'PF' || p.data.position === 'C')) {
+            // BEHAVIOR 2: FLARE SCREEN
+            p.offBallAction = 'FLARE_SCREEN';
+            p.offBallTimer = 0;
+            const wingPartner = gswTeammates.find(t => t.data.position === 'SG' || t.data.position === 'SF');
+            p.offBallPartner = wingPartner || null;
+            const screenX = wingPartner ? wingPartner.position.x * 0.65 : (p.position.x > 0 ? 3.2 : -3.2);
+            p.offBallTargetPos = new THREE.Vector3(screenX, 0, -8.2);
+          } else if (rand < 0.90 && (p.data.position === 'SG' || p.data.position === 'SF' || p.data.position === 'PG')) {
+            // BEHAVIOR 3: BASELINE RELOCATION
+            p.offBallAction = 'BASELINE_RELOCATE';
+            p.offBallTimer = 0;
+            const newX = p.position.x > 0 ? -6.2 : 6.2;
+            p.offBallTargetPos = new THREE.Vector3(newX, 0, -12.3);
           }
-          p.lookAt(user.position.x, p.position.y, user.position.z);
-          // Raise hands calling for pass
-          p.leftArmPivot.rotation.x = -1.25;
-          p.rightArmPivot.rotation.x = -1.25;
+        }
+
+        // --------------------------------------------------------------------
+        // 2. BEHAVIOR TREE EXECUTION
+        // --------------------------------------------------------------------
+        if (p.offBallAction === 'BACKDOOR_CUT') {
+          const target = p.offBallTargetPos || targetRim;
+          const toCut = new THREE.Vector3().subVectors(target, p.position);
+          toCut.y = 0;
+          if (toCut.length() > 0.3) {
+            toCut.normalize();
+            p.position.addScaledVector(toCut, p.data.speed * 1.25 * dt);
+          }
+          // Hands raised calling for alley-oop or bounce pass!
+          p.leftArmPivot.rotation.x = -1.45;
+          p.rightArmPivot.rotation.x = -1.45;
+          p.lookAt(targetRim.x, p.position.y, targetRim.z);
+
+          // Clear out after 1.5s so paint stays open
+          if (p.offBallTimer > 1.5) {
+            p.offBallAction = 'SPACING';
+            p.offBallTimer = 0;
+          }
           return;
         }
 
-        // B. WARRIORS OFF-BALL PIN-DOWN SCREEN (Draymond screens for Klay)
-        const isDraymond = p.data.position === 'PF';
-        const isKlay = p.data.position === 'SG';
-        const klay = gswTeammates.find(t => t.data.position === 'SG');
-
-        if (this.gswCutTimer < 3.8 && isDraymond && klay) {
-          // Draymond plants a down-screen at the left elbow
-          const screenSpot = new THREE.Vector3(-2.6, 0, -7.2);
-          const toScreen = new THREE.Vector3().subVectors(screenSpot, p.position);
+        if (p.offBallAction === 'FLARE_SCREEN') {
+          const target = p.offBallTargetPos || new THREE.Vector3(-2.8, 0, -8.0);
+          const toScreen = new THREE.Vector3().subVectors(target, p.position);
           toScreen.y = 0;
           if (toScreen.length() > 0.25) {
             toScreen.normalize();
@@ -5779,129 +6684,68 @@ export class BasketballGame {
           } else {
             p.isScreenAnim = true;
           }
-          p.lookAt(screenSpot.x, p.position.y, screenSpot.z);
+          p.lookAt(user.position.x, p.position.y, user.position.z);
+
+          if (p.offBallTimer > 2.2) {
+            p.isScreenAnim = false;
+            p.offBallAction = 'SPACING';
+            p.offBallTimer = 0;
+          }
           return;
         }
 
-        if (this.gswCutTimer < 3.8 && isKlay) {
-          // Klay rubs defender off Draymond's pin-down and flares to the 3-point wing!
-          const flareTarget = new THREE.Vector3(-5.4, 0, -8.2);
-          const toFlare = new THREE.Vector3().subVectors(flareTarget, p.position);
-          toFlare.y = 0;
-          if (toFlare.length() > 0.3) {
-            toFlare.normalize();
-            p.position.addScaledVector(toFlare, p.data.speed * 1.2 * dt);
+        if (p.offBallAction === 'BASELINE_RELOCATE') {
+          const target = p.offBallTargetPos || new THREE.Vector3(p.position.x > 0 ? -6.2 : 6.2, 0, -12.3);
+          const toRelocate = new THREE.Vector3().subVectors(target, p.position);
+          toRelocate.y = 0;
+          if (toRelocate.length() > 0.3) {
+            toRelocate.normalize();
+            p.position.addScaledVector(toRelocate, p.data.speed * 1.15 * dt);
           }
           p.lookAt(user.position.x, p.position.y, user.position.z);
-          // Hands raised calling for the catch-and-shoot pass!
-          p.leftArmPivot.rotation.x = -1.35;
-          p.rightArmPivot.rotation.x = -1.35;
-          return;
-        }
+          p.leftArmPivot.rotation.x = -1.2;
+          p.rightArmPivot.rotation.x = -1.2;
 
-        // C. ON-BALL PICK & ROLL / PICK & POP (Draymond Green or Kevon Looney)
-        const isScreener = p.data.position === 'C' || (p.data.position === 'PF' && this.gswCutTimer >= 3.8);
-        const userInPerimeter = user.position.z > -10.5;
-
-        if (isScreener && userInPerimeter && this.gswScreenTimer > 2.5 && userDefender) {
-          const screenPhase = this.gswScreenTimer - 2.5;
-
-          if (screenPhase < 2.8) {
-            // Phase 1: Set solid on-ball screen adjacent to the user's defender
-            const screenSide = user.position.x >= 0 ? -0.85 : 0.85;
-            const screenTarget = new THREE.Vector3(userDefender.position.x + screenSide, 0, userDefender.position.z + 0.35);
-            const toScreen = new THREE.Vector3().subVectors(screenTarget, p.position);
-            toScreen.y = 0;
-
-            if (toScreen.length() > 0.25) {
-              toScreen.normalize();
-              p.position.addScaledVector(toScreen, p.data.speed * 1.1 * dt);
-              p.isScreenAnim = false;
-            } else {
-              p.isScreenAnim = true;
-            }
-            p.lookAt(userDefender.position.x, p.position.y, userDefender.position.z);
-          } else {
-            p.isScreenAnim = false;
-            // Phase 2: Roll hard to the rim or Pop out to the 3-point line!
-            const shouldPop = p.data.position === 'PF'; // Draymond pops, Looney rolls
-            const target = shouldPop ? new THREE.Vector3(0, 0, -6.8) : new THREE.Vector3(1.2, 0, -11.2);
-            const toAction = new THREE.Vector3().subVectors(target, p.position);
-            toAction.y = 0;
-            if (toAction.length() > 0.3) {
-              toAction.normalize();
-              p.position.addScaledVector(toAction, p.data.speed * 1.15 * dt);
-            }
-            p.lookAt(user.position.x, p.position.y, user.position.z);
-            // Hands ready to catch
-            p.leftArmPivot.rotation.x = -1.2;
-            p.rightArmPivot.rotation.x = -1.2;
-
-            if (this.gswScreenTimer > 6.5) {
-              this.gswScreenTimer = 0;
-            }
+          if (p.offBallTimer > 1.8) {
+            p.offBallAction = 'SPACING';
+            p.offBallTimer = 0;
           }
           return;
         }
 
-        // D. BACKDOOR BASELINE CUT TO BASKET (Andrew Wiggins)
-        const isWiggins = p.data.position === 'SF';
-        if (isWiggins && this.gswCutTimer > 4.5 && this.gswCutTimer < 6.8) {
-          // Sprint backdoor behind the defense toward the rim!
-          const cutTarget = new THREE.Vector3(1.8, 0, -11.4);
-          const toCut = new THREE.Vector3().subVectors(cutTarget, p.position);
-          toCut.y = 0;
-          if (toCut.length() > 0.3) {
-            toCut.normalize();
-            p.position.addScaledVector(toCut, p.data.speed * 1.22 * dt);
-            p.lookAt(targetRim.x, p.position.y, targetRim.z);
-            // Hands raised calling for alley-oop or bounce pass!
-            p.leftArmPivot.rotation.x = -1.45;
-            p.rightArmPivot.rotation.x = -1.45;
-          }
-          if (this.gswCutTimer >= 6.8) {
-            this.gswCutTimer = 0;
-          }
-          return;
+        // DEFAULT: RIGID 5-OUT / 4-OUT/1-IN ANCHOR HOLDING (ZERO SCRUM)
+        let anchorPos = availableAnchors[idx % availableAnchors.length].pos;
+        // 4-Out/1-In: Center (Looney) plays the Dunker Spot near the low block
+        if (p.data.position === 'C') {
+          anchorPos = dunkerSpot;
         }
 
-        // E. 5-OUT DYNAMIC PERIMETER MOTION, DRIFT-AND-FILL & PASS RELOCATION
-        const baseSpot = offBallSpots[p.data.position] || new THREE.Vector3(-4.5, 0, -8.0);
-        const dynamicSway = Math.sin(this.gameClock * 2.2 + p.position.x) * 0.42;
-        const targetSpot = new THREE.Vector3(baseSpot.x + dynamicSway, 0, baseSpot.z);
-
-        // NBA "Drift and Fill": If user drives deep into the paint, perimeter shooters drift to corner pockets
-        if (user.position.z < -6.8) {
-          if (p.data.position === 'SG') {
-            targetSpot.set(-6.1, 0, -11.2); // Left corner 3
-          } else if (p.data.position === 'SF') {
-            targetSpot.set(6.1, 0, -11.2);  // Right corner 3
-          } else if (p.data.position === 'PF') {
-            targetSpot.set(0.0, 0, -6.6);   // Top of key safety valve
-          }
+        // Drift and fill: If carrier drives deep into paint (< -7.5m), push wings to corner pockets
+        const targetPos = anchorPos.clone();
+        if (user.position.z < -7.5) {
+          if (p.data.position === 'SG') targetPos.set(-6.2, 0, -12.3);
+          else if (p.data.position === 'SF') targetPos.set(6.2, 0, -12.3);
+          else if (p.data.position === 'PF') targetPos.set(0.0, 0, -6.6);
         } else {
-          // Flare away along the 3-point line to preserve spacing if user approaches
-          const userDistToSpot = targetSpot.distanceTo(user.position);
-          if (userDistToSpot < 2.8) {
-            targetSpot.x = targetSpot.x > 0 ? targetSpot.x + 1.4 : targetSpot.x - 1.4;
-          }
+          // Add subtle rhythmic sway so players stay active on their toes
+          const sway = Math.sin(this.gameClock * 2.0 + idx) * 0.22;
+          targetPos.x += sway;
         }
 
-        const toSpot = new THREE.Vector3().subVectors(targetSpot, p.position);
-        toSpot.y = 0;
-        if (toSpot.length() > 0.28) {
-          toSpot.normalize();
-          p.position.addScaledVector(toSpot, p.data.speed * 0.92 * dt);
+        const toAnchor = new THREE.Vector3().subVectors(targetPos, p.position);
+        toAnchor.y = 0;
+        if (toAnchor.length() > 0.25) {
+          toAnchor.normalize();
+          p.position.addScaledVector(toAnchor, p.data.speed * 0.95 * dt);
         }
-        // Always face the ball carrier ready for catch-and-shoot!
         p.lookAt(user.position.x, p.position.y, user.position.z);
 
-        // Smart Calling for Ball: When wide open outside the arc, raise hands calling for pass!
+        // Raise hands calling for catch-and-shoot when open
         const oppDef = this.getNearestDefender(p);
         const oppDist = oppDef ? oppDef.position.distanceTo(p.position) : 99;
-        if (oppDist > 2.2 && p.data.threePointRating >= 80 && !p.isPassingAnim && !p.isShootingAnim) {
-          p.leftArmPivot.rotation.x = -1.45;
-          p.rightArmPivot.rotation.x = -1.45;
+        if (oppDist > 2.2 && !p.isPassingAnim && !p.isShootingAnim) {
+          p.leftArmPivot.rotation.x = -1.35;
+          p.rightArmPivot.rotation.x = -1.35;
         }
       });
     }
@@ -6003,19 +6847,81 @@ export class BasketballGame {
         return;
       }
 
-      if (move.lengthSq() > 0) {
-        move.normalize();
-        this.controlledPlayer.position.addScaledVector(
-          move,
-          this.controlledPlayer.data.speed * speedMult * dt
-        );
-        this.controlledPlayer.lookAt(
-          this.controlledPlayer.position.x + move.x,
-          this.controlledPlayer.position.y,
-          this.controlledPlayer.position.z + move.z
-        );
+      // ----------------------------------------------------------------------
+      // INERTIA, ACCELERATION, DECELERATION & MOMENTUM LOSS
+      // ----------------------------------------------------------------------
+      if (!this.controlledPlayer.velocity) {
+        this.controlledPlayer.velocity = new THREE.Vector3();
+      }
+      if (!this.controlledPlayer.targetVelocity) {
+        this.controlledPlayer.targetVelocity = new THREE.Vector3();
+      }
 
-        // Sneaker squeak sound on sharp turns
+      const hasMoveInput = move.lengthSq() > 0.001;
+      if (hasMoveInput) {
+        move.normalize();
+        const maxSpeed = this.controlledPlayer.data.speed * speedMult;
+        this.controlledPlayer.targetVelocity.copy(move).multiplyScalar(maxSpeed);
+
+        // Momentum loss & braking frames on sharp directional changes / cuts / crossovers
+        const curSpeed = this.controlledPlayer.velocity.length();
+        if (curSpeed > 0.8) {
+          const curDir = this.controlledPlayer.velocity.clone().normalize();
+          const dot = curDir.dot(move); // 1 = forward, 0 = 90 deg cut, -1 = reverse
+          if (dot < 0.45) {
+            // Cut or crossover: plant foot absorbs momentum on the hardwood
+            const cutFactor = Math.max(0.28, (dot + 1) * 0.5);
+            this.controlledPlayer.velocity.multiplyScalar(Math.pow(cutFactor, dt * 10.0));
+
+            // Hard plant sneaker squeak
+            if (curSpeed > 2.2 && (this.gameClock - this.lastSqueakTime > 0.65)) {
+              sounds.playSneakerSqueak();
+              this.lastSqueakTime = this.gameClock;
+            }
+          }
+        }
+      } else {
+        // Zero input -> target velocity is zero (smooth deceleration & braking frames)
+        this.controlledPlayer.targetVelocity.set(0, 0, 0);
+      }
+
+      // Smooth Acceleration (9.2 m/s²) vs Braking / Deceleration (13.5 m/s²)
+      const accelRate = hasMoveInput ? (isTryingSprint ? 11.0 : 8.8) : 13.5;
+      this.controlledPlayer.velocity.lerp(this.controlledPlayer.targetVelocity, Math.min(1.0, accelRate * dt));
+
+      // Advance position based on integrated velocity
+      this.controlledPlayer.position.addScaledVector(this.controlledPlayer.velocity, dt);
+
+      // Smooth facing rotation & realistic torso bank into turns
+      const currentSpeed = this.controlledPlayer.velocity.length();
+      this.controlledPlayer.currentSpeed = currentSpeed;
+
+      if (currentSpeed > 0.12) {
+        const moveHeading = Math.atan2(this.controlledPlayer.velocity.x, this.controlledPlayer.velocity.z);
+        const currentHeading = this.controlledPlayer.rotation.y;
+        let angleDiff = moveHeading - currentHeading;
+        while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
+        while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
+        this.controlledPlayer.rotation.y += angleDiff * Math.min(1.0, 15.0 * dt);
+
+        // Dynamic body lean into sharp curves
+        const bankAngle = THREE.MathUtils.clamp(-angleDiff * 0.45, -0.25, 0.25);
+        this.controlledPlayer.torsoMesh.rotation.z = THREE.MathUtils.lerp(
+          this.controlledPlayer.torsoMesh.rotation.z,
+          bankAngle,
+          Math.min(1.0, 10.0 * dt)
+        );
+      } else {
+        // Return torso bank to neutral when stopped
+        this.controlledPlayer.torsoMesh.rotation.z = THREE.MathUtils.lerp(
+          this.controlledPlayer.torsoMesh.rotation.z,
+          0,
+          Math.min(1.0, 12.0 * dt)
+        );
+      }
+
+      if (hasMoveInput) {
+        // Sneaker squeak sound on high-speed sprint turns
         if (this.gameClock - this.lastSqueakTime > 0.9 && speedMult > 1.0 && Math.random() < 0.2) {
           sounds.playSneakerSqueak();
           this.lastSqueakTime = this.gameClock;
@@ -6026,15 +6932,22 @@ export class BasketballGame {
         this.players.forEach(other => {
           if (other === this.controlledPlayer) return;
           const dist = this.controlledPlayer.position.distanceTo(other.position);
-          const minDist = 0.62;
-          if (dist < minDist && dist > 0.001) {
+          const contactDist = 0.90;
+          if (dist < contactDist && dist > 0.001) {
             // Elastic pushback so players don't interpenetrate
             const pushDir = new THREE.Vector3().subVectors(this.controlledPlayer.position, other.position);
             pushDir.y = 0;
             pushDir.normalize();
-            const overlap = minDist - dist;
-            this.controlledPlayer.position.addScaledVector(pushDir, overlap * 0.6);
-            other.position.addScaledVector(pushDir, -overlap * 0.4);
+            const overlap = contactDist - dist;
+            this.controlledPlayer.position.addScaledVector(pushDir, overlap * 0.55);
+            other.position.addScaledVector(pushDir, -overlap * 0.45);
+
+            // Deflect velocity away from collision normal
+            const relVel = this.controlledPlayer.velocity.clone().sub(other.velocity);
+            const vDotN = relVel.dot(pushDir);
+            if (vDotN < 0) {
+              this.controlledPlayer.velocity.addScaledVector(pushDir, -vDotN * 0.7);
+            }
 
             // Heavy Collision Interaction (High-velocity body contact)
             const isHeavyImpact = isSprinting || other.currentSpeed > 1.8;
@@ -6543,6 +7456,23 @@ export class BasketballGame {
         return;
       }
 
+      // 8b. BOX OUT STANCE (Sealing opponent, wide athletic base, knees flexed, arms extended back/outward)
+      if (p.isBoxOut && !p.isReboundingAnim) {
+        p.leftLegPivot.rotation.x = 0.25;
+        p.rightLegPivot.rotation.x = 0.25;
+        p.leftLegPivot.rotation.z = 0.35;
+        p.rightLegPivot.rotation.z = -0.35;
+        p.leftKneePivot.rotation.x = 0.65;
+        p.rightKneePivot.rotation.x = 0.65;
+        p.leftArmPivot.rotation.x = 0.35;
+        p.rightArmPivot.rotation.x = 0.35;
+        p.leftArmPivot.rotation.z = -0.75;
+        p.rightArmPivot.rotation.z = 0.75;
+        p.leftElbowPivot.rotation.x = -0.85;
+        p.rightElbowPivot.rotation.x = -0.85;
+        p.torsoMesh.rotation.x = 0.18;
+      }
+
       // 9. BRICK WALL SCREEN ANIMATION (Wide sturdy base, knees bent, arms folded across chest)
       if (p.isScreenAnim) {
         p.screenAnimTimer = (p.screenAnimTimer || 0) + dt;
@@ -6798,6 +7728,7 @@ export class BasketballGame {
       this.updatePlayerMovement(dt);
       this.updateHoustonAI(dt);
       this.updateGSWTeammatesAI(dt);
+      this.applyPlayerSpacingAndAntiBunching(dt);
       this.updateBallPhysics(dt);
       this.checkOfficialNBARules(dt);
 
@@ -6909,4 +7840,24 @@ interface PlayerMesh extends THREE.Group {
   isInjured?: boolean;
   injuredAnimTimer?: number;
   injuryType?: string;
+  offBallAction?: 'SPACING' | 'BACKDOOR_CUT' | 'FLARE_SCREEN' | 'BASELINE_RELOCATE';
+  offBallTimer?: number;
+  offBallTargetPos?: THREE.Vector3;
+  offBallPartner?: PlayerMesh | null;
+  isBoxOut?: boolean;
+  boxOutTimer?: number;
+  velocity: THREE.Vector3;
+  targetVelocity: THREE.Vector3;
+}
+
+export interface NetPhysicsState {
+  mesh: THREE.Mesh;
+  basePositions: Float32Array;
+  reactionTimer: number;
+  reactionDuration: number;
+  intensity: number;
+  reactionDir: THREE.Vector3;
+  ballInside: boolean;
+  ballLocalY: number;
+  needsReset: boolean;
 }
