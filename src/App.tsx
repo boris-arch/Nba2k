@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { BasketballGame, ShotMeterEvent, FoulEventUI, ViolationEventUI, InjuryEventUI } from './game';
+import { BasketballGame, ShotMeterEvent, FoulEventUI, ViolationEventUI, InjuryEventUI, PlayerData } from './game';
 import { sounds } from './audio';
 
 interface JoystickProps {
@@ -167,6 +167,20 @@ export default function App() {
   const [tipOffFading, setTipOffFading] = useState(false);
   const [tipOffMounted, setTipOffMounted] = useState(true);
 
+  // Active Game Mode: 'NORMAL' (5v5 Arena Showdown) vs 'FREE_THROW_ONLY' (Charity Stripe Shootout)
+  const [gameMode, setGameMode] = useState<'NORMAL' | 'FREE_THROW_ONLY'>('NORMAL');
+  const [selectedMenuMode, setSelectedMenuMode] = useState<'NORMAL' | 'FREE_THROW_ONLY'>('NORMAL');
+  const [showModeModal, setShowModeModal] = useState(false);
+  const [autoSwitch, setAutoSwitch] = useState(true);
+  const [controlledPlayer, setControlledPlayer] = useState<PlayerData | null>(null);
+  const [ftStats, setFtStats] = useState({
+    made: 0,
+    attempts: 0,
+    streak: 0,
+    bestStreak: 0,
+    greens: 0,
+  });
+
   // Controls Modal / Helper
   const [showControlsGuide, setShowControlsGuide] = useState(false);
 
@@ -175,6 +189,10 @@ export default function App() {
 
     const game = new BasketballGame(containerRef.current);
     gameRef.current = game;
+
+    game.onFreeThrowStatsUpdate = (stats) => {
+      setFtStats(stats);
+    };
 
     game.onScoreUpdate = (home, away) => {
       setHomeScore(home);
@@ -239,6 +257,17 @@ export default function App() {
       }, 2600);
     };
 
+    game.onAutoSwitchChange = (enabled) => {
+      setAutoSwitch(enabled);
+    };
+
+    game.onControlledPlayerChange = (player) => {
+      setControlledPlayer(player);
+    };
+
+    setAutoSwitch(game.autoSwitchEnabled);
+    setControlledPlayer(game.getControlledPlayerData());
+
     return () => {
       if (meterTimeoutRef.current) clearTimeout(meterTimeoutRef.current);
       if (violationTimeoutRef.current) clearTimeout(violationTimeoutRef.current);
@@ -247,14 +276,31 @@ export default function App() {
     };
   }, []);
 
-  const handleStartTipOff = () => {
+  const handleStartGame = (mode: 'NORMAL' | 'FREE_THROW_ONLY') => {
+    setGameMode(mode);
     setTipOffStarted(true);
     setTipOffFading(true);
+
+    if (mode === 'FREE_THROW_ONLY') {
+      gameRef.current?.startFreeThrowShootout();
+    } else {
+      gameRef.current?.startNormalGame();
+    }
 
     setTimeout(() => {
       setTipOffMounted(false);
       setTipOffFading(false);
     }, 500);
+  };
+
+  const handleSwitchMode = (mode: 'NORMAL' | 'FREE_THROW_ONLY') => {
+    setGameMode(mode);
+    setShowModeModal(false);
+    if (mode === 'FREE_THROW_ONLY') {
+      gameRef.current?.startFreeThrowShootout();
+    } else {
+      gameRef.current?.startNormalGame();
+    }
   };
 
   const handleJoystickMove = (x: number, y: number) => {
@@ -267,108 +313,229 @@ export default function App() {
       <div ref={containerRef} className="w-full h-full" />
 
       {/* ========================================================================= */}
-      {/* 1. TOP BROADCAST SCOREBUG (SLEEK, CLEAN & INTENTIONAL) */}
+      {/* 1. TOP BROADCAST SCOREBUG / FREE THROW SHOOTOUT HUD */}
       {/* ========================================================================= */}
       <header className="absolute top-4 left-1/2 -translate-x-1/2 z-20 pointer-events-none">
-        <div className="flex items-stretch bg-slate-950/85 backdrop-blur-xl border border-white/10 rounded-2xl shadow-[0_12px_36px_rgba(0,0,0,0.65)] overflow-hidden pointer-events-auto">
-          {/* GSW Team Pod */}
-          <div className="flex items-center px-4 py-2 bg-gradient-to-r from-[#0053bc]/30 to-transparent border-r border-white/5 gap-3">
-            <div className="flex flex-col items-start">
-              <div className="flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-[#fdb927]" />
-                <span className="font-black text-sm tracking-wider text-[#fdb927]">GSW</span>
-                {hasBall && (
-                  <span className="text-[10px] text-amber-400 font-bold leading-none animate-pulse">◀</span>
-                )}
-              </div>
-              <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-semibold tracking-wider">
-                <span>F:{gswFouls}</span>
-                {gswBonus && (
-                  <span className="text-[9px] font-black px-1 rounded bg-amber-400 text-slate-950 leading-tight">
-                    BONUS
-                  </span>
-                )}
-              </div>
-            </div>
-            <span className="text-2xl sm:text-3xl font-black font-mono tracking-tight text-white min-w-[28px] text-right">
-              {homeScore}
-            </span>
-          </div>
-
-          {/* Center Clock & Shot Clock Column */}
-          <div className="flex flex-col items-center justify-center px-4 py-1.5 bg-slate-900/60 min-w-[76px]">
-            <span className="text-[9px] font-bold uppercase tracking-widest text-slate-400">SHOT</span>
-            <span
-              className={`text-xl font-mono font-black leading-none ${
-                shotClock <= 5
-                  ? 'text-red-400 animate-pulse drop-shadow-[0_0_8px_rgba(248,113,113,0.8)]'
-                  : 'text-emerald-400'
-              }`}
-            >
-              {shotClock}
-            </span>
-            {/* Player Stamina Bar with Fatigue Warning */}
-            <div className="flex flex-col items-center mt-1">
-              <div className="w-14 h-1.5 bg-slate-800 rounded-full overflow-hidden border border-white/10">
-                <div
-                  className={`h-full transition-all duration-100 ${
-                    stamina > 0.4
-                      ? 'bg-amber-400'
-                      : stamina > 0.15
-                      ? 'bg-orange-500'
-                      : 'bg-red-500 animate-pulse'
-                  }`}
-                  style={{ width: `${Math.max(0, stamina * 100)}%` }}
-                />
-              </div>
-              {stamina < 0.20 && (
-                <span className="text-[7px] font-black uppercase tracking-wider text-red-400 animate-pulse leading-none mt-0.5">
-                  Fatigue
+        {gameMode === 'FREE_THROW_ONLY' ? (
+          <div className="flex items-center bg-slate-950/90 backdrop-blur-xl border border-amber-400/50 rounded-2xl shadow-[0_12px_36px_rgba(245,158,11,0.25)] px-4 py-2 pointer-events-auto gap-3 sm:gap-4">
+            <div className="flex items-center gap-2 border-r border-white/10 pr-3">
+              <span className="text-xl">🎯</span>
+              <div className="flex flex-col">
+                <span className="text-[9px] font-black uppercase tracking-widest text-amber-400">
+                  FREE THROW SHOOTOUT
                 </span>
-              )}
+                <span className="text-xs font-bold text-slate-200">
+                  S. Curry #30
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3 sm:gap-4 font-mono text-center">
+              <div className="flex flex-col">
+                <span className="text-[8px] uppercase tracking-wider text-slate-400 font-bold">MADE</span>
+                <span className="text-base sm:text-lg font-black text-white">
+                  {ftStats.made} <span className="text-xs text-slate-400 font-normal">/ {ftStats.attempts}</span>
+                </span>
+              </div>
+              <div className="flex flex-col">
+                <span className="text-[8px] uppercase tracking-wider text-slate-400 font-bold">PCT</span>
+                <span className="text-base sm:text-lg font-black text-emerald-400">
+                  {ftStats.attempts > 0 ? ((ftStats.made / ftStats.attempts) * 100).toFixed(0) : '100'}%
+                </span>
+              </div>
+              <div className="flex flex-col border-l border-white/10 pl-3">
+                <span className="text-[8px] uppercase tracking-wider text-amber-400 font-bold">STREAK</span>
+                <span className="text-base sm:text-lg font-black text-amber-300 flex items-center justify-center gap-0.5">
+                  <span>{ftStats.streak}</span>
+                  <span className="text-xs">🔥</span>
+                </span>
+              </div>
+              <div className="flex flex-col">
+                <span className="text-[8px] uppercase tracking-wider text-slate-400 font-bold">BEST</span>
+                <span className="text-base sm:text-lg font-black text-yellow-400 flex items-center justify-center gap-0.5">
+                  <span>{ftStats.bestStreak}</span>
+                  <span className="text-xs">🏆</span>
+                </span>
+              </div>
             </div>
           </div>
-
-          {/* HOU Team Pod */}
-          <div className="flex items-center px-4 py-2 bg-gradient-to-l from-[#ce1141]/30 to-transparent border-l border-white/5 gap-3">
-            <span className="text-2xl sm:text-3xl font-black font-mono tracking-tight text-white min-w-[28px] text-left">
-              {awayScore}
-            </span>
-            <div className="flex flex-col items-end">
-              <div className="flex items-center gap-1.5">
-                {!hasBall && (
-                  <span className="text-[10px] text-red-400 font-bold leading-none animate-pulse">▶</span>
-                )}
-                <span className="font-black text-sm tracking-wider text-red-500">HOU</span>
-                <span className="w-2 h-2 rounded-full bg-[#ce1141]" />
+        ) : (
+          <div className="flex items-stretch bg-slate-950/85 backdrop-blur-xl border border-white/10 rounded-2xl shadow-[0_12px_36px_rgba(0,0,0,0.65)] overflow-hidden pointer-events-auto">
+            {/* GSW Team Pod */}
+            <div className="flex items-center px-4 py-2 bg-gradient-to-r from-[#0053bc]/30 to-transparent border-r border-white/5 gap-3">
+              <div className="flex flex-col items-start">
+                <div className="flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-[#fdb927]" />
+                  <span className="font-black text-sm tracking-wider text-[#fdb927]">GSW</span>
+                  {hasBall && (
+                    <span className="text-[10px] text-amber-400 font-bold leading-none animate-pulse">◀</span>
+                  )}
+                </div>
+                <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-semibold tracking-wider">
+                  <span>F:{gswFouls}</span>
+                  {gswBonus && (
+                    <span className="text-[9px] font-black px-1 rounded bg-amber-400 text-slate-950 leading-tight">
+                      BONUS
+                    </span>
+                  )}
+                </div>
               </div>
-              <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-semibold tracking-wider">
-                {houBonus && (
-                  <span className="text-[9px] font-black px-1 rounded bg-amber-400 text-slate-950 leading-tight">
-                    BONUS
+              <span className="text-2xl sm:text-3xl font-black font-mono tracking-tight text-white min-w-[28px] text-right">
+                {homeScore}
+              </span>
+            </div>
+
+            {/* Center Clock & Shot Clock Column */}
+            <div className="flex flex-col items-center justify-center px-4 py-1.5 bg-slate-900/60 min-w-[76px]">
+              <span className="text-[9px] font-bold uppercase tracking-widest text-slate-400">SHOT</span>
+              <span
+                className={`text-xl font-mono font-black leading-none ${
+                  shotClock <= 5
+                    ? 'text-red-400 animate-pulse drop-shadow-[0_0_8px_rgba(248,113,113,0.8)]'
+                    : 'text-emerald-400'
+                }`}
+              >
+                {shotClock}
+              </span>
+              {/* Player Stamina Bar with Fatigue Warning */}
+              <div className="flex flex-col items-center mt-1">
+                <div className="w-14 h-1.5 bg-slate-800 rounded-full overflow-hidden border border-white/10">
+                  <div
+                    className={`h-full transition-all duration-100 ${
+                      stamina > 0.4
+                        ? 'bg-amber-400'
+                        : stamina > 0.15
+                        ? 'bg-orange-500'
+                        : 'bg-red-500 animate-pulse'
+                    }`}
+                    style={{ width: `${Math.max(0, stamina * 100)}%` }}
+                  />
+                </div>
+                {stamina < 0.20 && (
+                  <span className="text-[7px] font-black uppercase tracking-wider text-red-400 animate-pulse leading-none mt-0.5">
+                    Fatigue
                   </span>
                 )}
-                <span>F:{houFouls}</span>
+              </div>
+            </div>
+
+            {/* HOU Team Pod */}
+            <div className="flex items-center px-4 py-2 bg-gradient-to-l from-[#ce1141]/30 to-transparent border-l border-white/5 gap-3">
+              <span className="text-2xl sm:text-3xl font-black font-mono tracking-tight text-white min-w-[28px] text-left">
+                {awayScore}
+              </span>
+              <div className="flex flex-col items-end">
+                <div className="flex items-center gap-1.5">
+                  {!hasBall && (
+                    <span className="text-[10px] text-red-400 font-bold leading-none animate-pulse">▶</span>
+                  )}
+                  <span className="font-black text-sm tracking-wider text-red-500">HOU</span>
+                  <span className="w-2 h-2 rounded-full bg-[#ce1141]" />
+                </div>
+                <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-semibold tracking-wider">
+                  {houBonus && (
+                    <span className="text-[9px] font-black px-1 rounded bg-amber-400 text-slate-950 leading-tight">
+                      BONUS
+                    </span>
+                  )}
+                  <span>F:{houFouls}</span>
+                </div>
               </div>
             </div>
           </div>
-        </div>
+        )}
+
+        {/* Active Controlled Player Indicator & Auto-Switch Pill (5v5 Normal Mode) */}
+        {gameMode === 'NORMAL' && controlledPlayer && !foulEvent && (
+          <div className="flex items-center justify-center mt-1.5 pointer-events-auto">
+            <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-slate-950/90 backdrop-blur-xl border border-white/15 shadow-xl text-xs">
+              <div className="flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+                <span className="text-amber-400 font-mono font-bold">#{controlledPlayer.number}</span>
+                <span className="font-extrabold text-white text-[11px]">{controlledPlayer.name}</span>
+                <span className="text-[9px] font-bold px-1.5 py-0.2 bg-blue-500/20 text-blue-300 rounded border border-blue-400/30">
+                  {controlledPlayer.position}
+                </span>
+              </div>
+              <span className="text-white/20">|</span>
+              <button
+                type="button"
+                onClick={() => {
+                  const next = gameRef.current?.toggleAutoSwitch();
+                  if (next !== undefined) setAutoSwitch(next);
+                }}
+                className={`text-[9px] font-black uppercase px-2 py-0.5 rounded-full border transition-all cursor-pointer flex items-center gap-1 ${
+                  autoSwitch
+                    ? 'bg-emerald-500/20 border-emerald-400/60 text-emerald-300 hover:bg-emerald-500/30 shadow-[0_0_8px_rgba(16,185,129,0.3)]'
+                    : 'bg-amber-500/20 border-amber-400/60 text-amber-300 hover:bg-amber-500/30'
+                }`}
+                title="Click to toggle Auto-Switch Player (T)"
+              >
+                <span>{autoSwitch ? '● AUTO-SWITCH' : '○ MANUAL'}</span>
+              </button>
+            </div>
+          </div>
+        )}
       </header>
 
       {/* ========================================================================= */}
-      {/* 2. TOP-RIGHT UTILITY DOCK (CAMERA, AUDIO, CONTROLS GUIDE) */}
+      {/* 2. TOP-RIGHT UTILITY DOCK (MODE MENU, CAMERA, AUDIO, CONTROLS GUIDE) */}
       {/* ========================================================================= */}
       <div className="absolute top-4 right-4 z-20 flex items-center gap-1.5">
-        {/* Tactical Bench Substitution Button */}
+        {/* Game Mode / Menu Button */}
         <button
           type="button"
-          onClick={() => gameRef.current?.triggerManualTacticalSubstitution()}
-          className="px-2.5 py-1.5 rounded-xl bg-slate-950/80 hover:bg-slate-900 border border-white/10 text-xs font-semibold text-slate-200 backdrop-blur-xl shadow-lg hover:border-white/20 active:scale-95 transition-all flex items-center gap-1 cursor-pointer"
-          title="Call Tactical Bench Substitution (B)"
+          onClick={() => {
+            setSelectedMenuMode(gameMode);
+            setShowModeModal(true);
+          }}
+          className={`px-2.5 sm:px-3 py-1.5 rounded-xl border text-xs font-semibold backdrop-blur-xl shadow-lg active:scale-95 transition-all flex items-center gap-1.5 cursor-pointer ${
+            gameMode === 'FREE_THROW_ONLY'
+              ? 'bg-amber-500/25 border-amber-400/90 text-amber-300 hover:bg-amber-500/35 shadow-[0_0_12px_rgba(245,158,11,0.3)]'
+              : 'bg-slate-950/80 hover:bg-slate-900 border-white/10 text-slate-200 hover:border-white/20'
+          }`}
+          title="Open Game Menu to choose game mode and settings"
         >
-          <span className="text-xs">🔄</span>
-          <span className="text-[11px] font-bold tracking-wide uppercase">Sub</span>
+          <span className="text-xs">🎮</span>
+          <span className="text-[11px] font-bold tracking-wide uppercase">
+            Menu: {gameMode === 'FREE_THROW_ONLY' ? 'Free Throws' : '5v5 Match'}
+          </span>
         </button>
+
+        {/* Auto-Switch Toggle Button (5v5 Mode) */}
+        {gameMode === 'NORMAL' && (
+          <button
+            type="button"
+            onClick={() => {
+              const next = gameRef.current?.toggleAutoSwitch();
+              if (next !== undefined) setAutoSwitch(next);
+            }}
+            className={`px-2.5 py-1.5 rounded-xl border text-xs font-semibold backdrop-blur-xl shadow-lg active:scale-95 transition-all flex items-center gap-1.5 cursor-pointer ${
+              autoSwitch
+                ? 'bg-emerald-500/20 border-emerald-400/70 text-emerald-300 hover:bg-emerald-500/30 shadow-[0_0_12px_rgba(16,185,129,0.3)]'
+                : 'bg-slate-950/80 hover:bg-slate-900 border-white/10 text-slate-400'
+            }`}
+            title="Toggle Automatic Player Switching (T)"
+          >
+            <span className="text-xs">{autoSwitch ? '🔄' : '✋'}</span>
+            <span className="text-[11px] font-bold tracking-wide uppercase">
+              Auto: {autoSwitch ? 'ON' : 'OFF'}
+            </span>
+          </button>
+        )}
+
+        {/* Tactical Bench Substitution Button (5v5 mode only) */}
+        {gameMode === 'NORMAL' && (
+          <button
+            type="button"
+            onClick={() => gameRef.current?.triggerManualTacticalSubstitution()}
+            className="px-2.5 py-1.5 rounded-xl bg-slate-950/80 hover:bg-slate-900 border border-white/10 text-xs font-semibold text-slate-200 backdrop-blur-xl shadow-lg hover:border-white/20 active:scale-95 transition-all flex items-center gap-1 cursor-pointer"
+            title="Call Tactical Bench Substitution (B)"
+          >
+            <span className="text-xs">🔄</span>
+            <span className="text-[11px] font-bold tracking-wide uppercase">Sub</span>
+          </button>
+        )}
 
         {/* Camera Toggle */}
         <button
@@ -834,6 +1001,8 @@ export default function App() {
           <span>·</span>
           <span><strong className="text-white font-semibold">C / Q</strong> Switch</span>
           <span>·</span>
+          <span><strong className="text-emerald-400 font-semibold">T</strong> Auto-Switch</span>
+          <span>·</span>
           <span><strong className="text-white font-semibold">B</strong> Sub</span>
         </div>
       )}
@@ -960,8 +1129,33 @@ export default function App() {
         ) : (
           /* REGULAR 5v5 GAMEPLAY THUMB CONTROLS */
           <>
-            {/* Top Row: Quick Utility Buttons (Switch Player & Turbo Sprint) */}
-            <div className="flex items-center gap-2.5">
+            {/* Top Row: Quick Utility Buttons (Auto-Switch, Switch Player & Turbo Sprint) */}
+            <div className="flex items-center gap-2">
+              {/* Auto-Switch Toggle Button */}
+              <button
+                type="button"
+                onTouchStart={(e) => {
+                  e.preventDefault();
+                  const next = gameRef.current?.toggleAutoSwitch();
+                  if (next !== undefined) setAutoSwitch(next);
+                }}
+                onClick={() => {
+                  const next = gameRef.current?.toggleAutoSwitch();
+                  if (next !== undefined) setAutoSwitch(next);
+                }}
+                className={`w-12 h-12 rounded-full border active:scale-90 transition-transform backdrop-blur-xl shadow-xl flex flex-col items-center justify-center cursor-pointer touch-manipulation ${
+                  autoSwitch
+                    ? 'bg-emerald-950/90 border-emerald-400 text-emerald-300 ring-1 ring-emerald-400/50 shadow-[0_0_12px_rgba(16,185,129,0.4)]'
+                    : 'bg-slate-950/80 hover:bg-slate-900 border-white/20 text-slate-400'
+                }`}
+                title="Toggle Automatic Player Switching (T)"
+              >
+                <span className="text-xs">{autoSwitch ? '🔄' : '✋'}</span>
+                <span className={`text-[7px] font-black uppercase tracking-wider -mt-0.5 ${autoSwitch ? 'text-emerald-300' : 'text-slate-400'}`}>
+                  {autoSwitch ? 'Auto' : 'Manual'}
+                </span>
+              </button>
+
               {/* Switch Player Button */}
               <button
                 type="button"
@@ -1126,8 +1320,12 @@ export default function App() {
                 <span className="font-mono font-bold text-amber-300">E or X</span>
               </div>
               <div className="flex justify-between items-center py-1 border-b border-white/5">
-                <span className="text-slate-400">Switch Player</span>
+                <span className="text-slate-400">Switch Player (Manual)</span>
                 <span className="font-mono font-bold text-amber-300">C or Q</span>
+              </div>
+              <div className="flex justify-between items-center py-1 border-b border-white/5">
+                <span className="text-slate-400">Auto-Switch Player</span>
+                <span className="font-mono font-bold text-emerald-400">T (Toggle)</span>
               </div>
             </div>
 
@@ -1143,21 +1341,182 @@ export default function App() {
       )}
 
       {/* ========================================================================= */}
-      {/* 10. TIP-OFF MATCHUP PREVIEW MODAL */}
+      {/* 10. GAME MENU & MODE SELECTION MODAL DIALOG */}
+      {/* ========================================================================= */}
+      {showModeModal && (
+        <div className="absolute inset-0 flex items-center justify-center bg-black/75 backdrop-blur-md z-50 p-4">
+          <div className="bg-slate-950 border border-white/15 rounded-3xl max-w-sm sm:max-w-md w-full p-5 sm:p-6 shadow-2xl space-y-4 max-h-[92dvh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-white/10 pb-3">
+              <h2 className="text-base sm:text-lg font-black tracking-wide text-white uppercase flex items-center gap-2">
+                <span>🎮</span> Game Menu & Modes
+              </h2>
+              <button
+                type="button"
+                onClick={() => setShowModeModal(false)}
+                className="text-slate-400 hover:text-white text-base font-bold p-1 cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Choose Game Mode Section */}
+            <div className="space-y-2">
+              <span className="text-[10px] uppercase font-bold tracking-wider text-slate-400">
+                Choose Game Mode:
+              </span>
+              <div className="space-y-2">
+                {/* Option 1: 5v5 Arena Showdown (Normal Game) */}
+                <button
+                  type="button"
+                  onClick={() => setSelectedMenuMode('NORMAL')}
+                  className={`w-full p-3.5 rounded-2xl border text-left transition-all cursor-pointer flex flex-col gap-1 ${
+                    selectedMenuMode === 'NORMAL'
+                      ? 'bg-gradient-to-br from-blue-600/30 via-slate-900 to-slate-950 border-amber-400 shadow-[0_0_16px_rgba(251,191,36,0.3)] ring-1 ring-amber-400'
+                      : 'bg-slate-900/60 border-white/10 hover:border-white/20'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-black text-white flex items-center gap-2">
+                      <span>🏀</span> Normal Game (5v5 Arena)
+                    </span>
+                    {selectedMenuMode === 'NORMAL' && (
+                      <span className="text-xs font-black text-amber-400 uppercase tracking-widest bg-amber-400/10 px-2 py-0.5 rounded-full border border-amber-400/30">
+                        {gameMode === 'NORMAL' ? 'Current' : 'Selected'}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-slate-300">
+                    Full court Warriors vs Rockets match with AI motion offense, screens, fast breaks, rebounds, and tactical subs.
+                  </p>
+                </button>
+
+                {/* Option 2: Free Throw Shootout */}
+                <button
+                  type="button"
+                  onClick={() => setSelectedMenuMode('FREE_THROW_ONLY')}
+                  className={`w-full p-3.5 rounded-2xl border text-left transition-all cursor-pointer flex flex-col gap-1 ${
+                    selectedMenuMode === 'FREE_THROW_ONLY'
+                      ? 'bg-gradient-to-br from-amber-500/30 via-slate-900 to-slate-950 border-amber-400 shadow-[0_0_16px_rgba(251,191,36,0.3)] ring-1 ring-amber-400'
+                      : 'bg-slate-900/60 border-white/10 hover:border-white/20'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-black text-amber-300 flex items-center gap-2">
+                      <span>🎯</span> Free Throw Only Game
+                    </span>
+                    {selectedMenuMode === 'FREE_THROW_ONLY' && (
+                      <span className="text-xs font-black text-amber-400 uppercase tracking-widest bg-amber-400/10 px-2 py-0.5 rounded-full border border-amber-400/30">
+                        {gameMode === 'FREE_THROW_ONLY' ? 'Current' : 'Selected'}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-slate-300">
+                    Charity stripe shootout with Stephen Curry, signature routines ([F] dribble, [R] spin, [C] focus), and streak tracking.
+                  </p>
+                </button>
+              </div>
+            </div>
+
+            {/* Automatic Player Switching Setting Card */}
+            <div className="bg-slate-900/70 border border-white/10 rounded-2xl p-3.5 space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="text-lg">🔄</span>
+                  <div>
+                    <h4 className="text-xs font-black text-white uppercase tracking-wider">
+                      Automatic Switch Player
+                    </h4>
+                    <span className="text-[10px] text-slate-400">
+                      {autoSwitch ? 'Automatically switches control to relevant player' : 'Manual switching only (C / Q)'}
+                    </span>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = gameRef.current?.toggleAutoSwitch();
+                    if (next !== undefined) setAutoSwitch(next);
+                  }}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-black uppercase tracking-wider cursor-pointer border transition-all ${
+                    autoSwitch
+                      ? 'bg-emerald-500 text-slate-950 border-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.5)]'
+                      : 'bg-slate-800 text-slate-400 border-white/10 hover:border-white/20'
+                  }`}
+                >
+                  {autoSwitch ? 'ON' : 'OFF'}
+                </button>
+              </div>
+              <p className="text-[11px] text-slate-400 leading-tight">
+                When enabled, control automatically switches to the pass receiver on offense, the closest defender on Houston drives, and the best rebounder on missed shots. Press <strong className="text-amber-300">T</strong> to toggle anytime.
+              </p>
+            </div>
+
+            {/* Quick Settings: Camera & Audio */}
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <div className="bg-slate-900/50 p-2.5 rounded-xl border border-white/5 space-y-1">
+                <span className="text-[10px] uppercase font-bold text-slate-400">Camera:</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const nextMode = gameRef.current?.toggleCameraMode();
+                    if (nextMode) setCameraMode(nextMode);
+                  }}
+                  className="w-full py-1 px-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-[11px] cursor-pointer"
+                >
+                  🎥 {cameraMode === 'SIDE' ? 'Broadcast' : cameraMode === 'COURTSIDE' ? 'Courtside' : '2K Drive'}
+                </button>
+              </div>
+              <div className="bg-slate-900/50 p-2.5 rounded-xl border border-white/5 space-y-1">
+                <span className="text-[10px] uppercase font-bold text-slate-400">Audio:</span>
+                <button
+                  type="button"
+                  onClick={() => setIsMuted(sounds.toggleMute())}
+                  className="w-full py-1 px-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-[11px] cursor-pointer"
+                >
+                  {isMuted ? '🔇 Muted' : '🔊 Sound On'}
+                </button>
+              </div>
+            </div>
+
+            {/* Primary Action Buttons */}
+            <div className="flex flex-col gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => handleSwitchMode(selectedMenuMode)}
+                className="w-full py-3 bg-gradient-to-r from-amber-500 to-yellow-400 hover:brightness-110 active:scale-95 text-slate-950 font-black text-xs sm:text-sm rounded-xl shadow-lg transition-transform cursor-pointer uppercase tracking-wider"
+              >
+                {selectedMenuMode !== gameMode
+                  ? `Switch to ${selectedMenuMode === 'NORMAL' ? '5v5 Normal Game' : 'Free Throw Only'}`
+                  : `Restart ${selectedMenuMode === 'NORMAL' ? '5v5 Match' : 'Free Throw Round'}`}
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowModeModal(false)}
+                className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 text-slate-300 font-bold text-xs rounded-xl transition-colors cursor-pointer uppercase tracking-wider"
+              >
+                Resume Game
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* 11. TIP-OFF & GAME MODE SELECTION PREVIEW MODAL */}
       {/* ========================================================================= */}
       {tipOffMounted && (
         <div
-          className={`absolute inset-0 flex flex-col items-center justify-center bg-slate-950/80 backdrop-blur-xl z-50 transition-opacity duration-300 ease-out ${
+          className={`absolute inset-0 flex flex-col items-center justify-center bg-slate-950/85 backdrop-blur-xl z-50 transition-opacity duration-300 ease-out p-4 ${
             tipOffFading ? 'opacity-0 pointer-events-none' : 'opacity-100'
           }`}
           style={tipOffFading ? { display: 'none' } : undefined}
         >
-          <div className="bg-slate-950/95 border border-white/10 p-5 sm:p-7 rounded-3xl max-w-sm sm:max-w-md w-full text-center shadow-[0_24px_64px_rgba(0,0,0,0.85)] space-y-4 sm:space-y-6 max-h-[90dvh] overflow-y-auto">
+          <div className="bg-slate-950/95 border border-white/10 p-5 sm:p-7 rounded-3xl max-w-sm sm:max-w-md w-full text-center shadow-[0_24px_64px_rgba(0,0,0,0.85)] space-y-4 sm:space-y-5 max-h-[92dvh] overflow-y-auto">
             <div className="space-y-1">
               <span className="text-[10px] sm:text-[11px] font-black uppercase tracking-widest text-amber-400">
-                NBA ARENA SHOWDOWN
+                NBA ARENA BROADCAST
               </span>
-              <h1 className="text-xl sm:text-3xl font-black text-white tracking-wide">
+              <h1 className="text-xl sm:text-2xl font-black text-white tracking-wide">
                 WARRIORS vs ROCKETS
               </h1>
               <p className="text-[11px] sm:text-xs text-slate-400 font-medium">
@@ -1166,29 +1525,108 @@ export default function App() {
             </div>
 
             {/* Matchup Head-to-Head Card */}
-            <div className="grid grid-cols-2 gap-2.5 sm:gap-3 py-1">
-              <div className="p-3 sm:p-3.5 rounded-2xl bg-gradient-to-b from-[#0053bc]/25 to-slate-900/60 border border-[#0053bc]/30 flex flex-col items-center">
-                <span className="text-[11px] sm:text-xs font-bold text-slate-400">GOLDEN STATE</span>
+            <div className="grid grid-cols-2 gap-2 sm:gap-3 py-1">
+              <div className="p-3 rounded-2xl bg-gradient-to-b from-[#0053bc]/25 to-slate-900/60 border border-[#0053bc]/30 flex flex-col items-center">
+                <span className="text-[10px] sm:text-[11px] font-bold text-slate-400">GOLDEN STATE</span>
                 <span className="text-xl sm:text-2xl font-black text-[#fdb927]">GSW</span>
                 <span className="text-[10px] text-slate-300 mt-1 font-semibold">S. Curry #30</span>
               </div>
-              <div className="p-3 sm:p-3.5 rounded-2xl bg-gradient-to-b from-[#ce1141]/25 to-slate-900/60 border border-[#ce1141]/30 flex flex-col items-center">
-                <span className="text-[11px] sm:text-xs font-bold text-slate-400">HOUSTON</span>
+              <div className="p-3 rounded-2xl bg-gradient-to-b from-[#ce1141]/25 to-slate-900/60 border border-[#ce1141]/30 flex flex-col items-center">
+                <span className="text-[10px] sm:text-[11px] font-bold text-slate-400">HOUSTON</span>
                 <span className="text-xl sm:text-2xl font-black text-red-500">HOU</span>
                 <span className="text-[10px] text-slate-300 mt-1 font-semibold">J. Green #4</span>
               </div>
             </div>
 
+            {/* Game Mode Selector */}
+            <div className="space-y-2 text-left pt-1">
+              <span className="text-[10px] uppercase font-bold tracking-wider text-slate-400">Choose Game Mode:</span>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {/* 5v5 Arena Option */}
+                <button
+                  type="button"
+                  onClick={() => setSelectedMenuMode('NORMAL')}
+                  className={`p-3 rounded-2xl border text-left transition-all cursor-pointer ${
+                    selectedMenuMode === 'NORMAL'
+                      ? 'bg-gradient-to-br from-blue-600/30 to-slate-950 border-amber-400 shadow-[0_0_12px_rgba(251,191,36,0.3)] ring-1 ring-amber-400'
+                      : 'bg-slate-900/70 border-white/10 hover:border-white/20'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-0.5">
+                    <span className="text-xs font-black text-white flex items-center gap-1.5">
+                      <span>🏀</span> 5v5 Arena Game
+                    </span>
+                    {selectedMenuMode === 'NORMAL' && (
+                      <span className="w-2 h-2 rounded-full bg-amber-400" />
+                    )}
+                  </div>
+                  <p className="text-[10px] text-slate-300 leading-tight">
+                    Full court 5v5 game with AI motion offense, screens, and fast breaks.
+                  </p>
+                </button>
+
+                {/* Free Throw Only Option */}
+                <button
+                  type="button"
+                  onClick={() => setSelectedMenuMode('FREE_THROW_ONLY')}
+                  className={`p-3 rounded-2xl border text-left transition-all cursor-pointer ${
+                    selectedMenuMode === 'FREE_THROW_ONLY'
+                      ? 'bg-gradient-to-br from-amber-500/30 to-slate-950 border-amber-400 shadow-[0_0_12px_rgba(251,191,36,0.3)] ring-1 ring-amber-400'
+                      : 'bg-slate-900/70 border-white/10 hover:border-white/20'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-0.5">
+                    <span className="text-xs font-black text-amber-300 flex items-center gap-1.5">
+                      <span>🎯</span> Free Throw Only
+                    </span>
+                    {selectedMenuMode === 'FREE_THROW_ONLY' && (
+                      <span className="w-2 h-2 rounded-full bg-amber-400" />
+                    )}
+                  </div>
+                  <p className="text-[10px] text-slate-300 leading-tight">
+                    Charity stripe shootout with Curry, routines, and streak tracking.
+                  </p>
+                </button>
+              </div>
+            </div>
+
+            {/* Auto Switch Player Toggle in Tip-Off Modal */}
+            <div className="bg-slate-900/60 border border-white/10 rounded-2xl p-3 flex items-center justify-between text-left">
+              <div>
+                <span className="text-xs font-black text-white uppercase tracking-wider flex items-center gap-1.5">
+                  <span>🔄</span> Automatic Player Switching
+                </span>
+                <p className="text-[10px] text-slate-400">
+                  Switches control to nearest ball-handler & defender
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  const next = !autoSwitch;
+                  setAutoSwitch(next);
+                  gameRef.current?.setAutoSwitch(next);
+                }}
+                className={`px-3 py-1.5 rounded-xl text-xs font-black uppercase transition-all cursor-pointer border ${
+                  autoSwitch
+                    ? 'bg-emerald-500 text-slate-950 border-emerald-300 shadow-[0_0_8px_rgba(16,185,129,0.4)]'
+                    : 'bg-slate-800 text-slate-400 border-white/10 hover:border-white/20'
+                }`}
+              >
+                {autoSwitch ? 'ON' : 'OFF'}
+              </button>
+            </div>
+
             <button
               type="button"
-              onClick={handleStartTipOff}
+              onClick={() => handleStartGame(selectedMenuMode)}
               onTouchStart={(e) => {
                 e.stopPropagation();
-                handleStartTipOff();
+                handleStartGame(selectedMenuMode);
               }}
               className="w-full py-3.5 bg-gradient-to-r from-amber-500 to-yellow-400 hover:brightness-110 active:scale-95 text-slate-950 font-black text-xs sm:text-sm rounded-xl shadow-lg transition-transform cursor-pointer uppercase tracking-wider touch-manipulation"
             >
-              Start Tip-Off 🏀
+              {selectedMenuMode === 'NORMAL' ? 'Tip-Off 5v5 Game 🏀' : 'Start Free Throw Shootout 🎯'}
             </button>
           </div>
         </div>

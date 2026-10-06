@@ -244,6 +244,34 @@ export class BasketballGame {
   // Free Throw & Foul Tracking
   private activeFoul: FreeThrowState | null = null;
 
+  // Automatic Player Switching Engine
+  public autoSwitchEnabled = true;
+  private autoSwitchCooldownTimer = 0;
+  private manualSwitchOverrideTimer = 0;
+  public onAutoSwitchChange?: (enabled: boolean) => void;
+  public onControlledPlayerChange?: (player: PlayerData) => void;
+
+  public getControlledPlayerData(): PlayerData | null {
+    return this.controlledPlayer ? this.controlledPlayer.data : null;
+  }
+
+  // Game Mode & Free Throw Shootout State
+  public gameMode: 'NORMAL' | 'FREE_THROW_ONLY' = 'NORMAL';
+  public ftStats = {
+    made: 0,
+    attempts: 0,
+    streak: 0,
+    bestStreak: 0,
+    greens: 0,
+  };
+  public onFreeThrowStatsUpdate?: (stats: {
+    made: number;
+    attempts: number;
+    streak: number;
+    bestStreak: number;
+    greens: number;
+  }) => void;
+
   // Official NBA Rule Tracking
   private hasEstablishedFrontcourt = false;
   private backcourtTimer = 0;
@@ -892,6 +920,7 @@ export class BasketballGame {
     player.add(this.nameplateSprite);
 
     this.updateControlledNameplate(player);
+    this.onControlledPlayerChange?.(player.data);
   }
 
   private updateControlledNameplate(player: PlayerMesh) {
@@ -2374,6 +2403,10 @@ export class BasketballGame {
       this.cycleControlledPlayer();
     }
 
+    if (key === 't') {
+      this.toggleAutoSwitch();
+    }
+
     if (key === 'b') {
       this.triggerManualTacticalSubstitution();
     }
@@ -2420,6 +2453,22 @@ export class BasketballGame {
     else if (this.cameraMode === 'COURTSIDE') this.cameraMode = 'BEHIND';
     else this.cameraMode = 'SIDE';
     return this.cameraMode;
+  }
+
+  public toggleAutoSwitch(): boolean {
+    this.autoSwitchEnabled = !this.autoSwitchEnabled;
+    this.onAutoSwitchChange?.(this.autoSwitchEnabled);
+    this.spawnFloatingStatus(
+      this.autoSwitchEnabled ? 'AUTO-SWITCH: ON 🔄' : 'AUTO-SWITCH: OFF (MANUAL) ✋',
+      this.controlledPlayer ? this.controlledPlayer.position : new THREE.Vector3(0, 2.5, 0),
+      this.autoSwitchEnabled ? '#10b981' : '#f59e0b'
+    );
+    return this.autoSwitchEnabled;
+  }
+
+  public setAutoSwitch(enabled: boolean) {
+    this.autoSwitchEnabled = enabled;
+    this.onAutoSwitchChange?.(this.autoSwitchEnabled);
   }
 
   public startShooting() {
@@ -2940,6 +2989,99 @@ export class BasketballGame {
     sounds.playCrowdCheer();
   }
 
+  // --------------------------------------------------------------------------
+  // FREE THROW SHOOTOUT & GAME MODE CONTROLLER
+  // --------------------------------------------------------------------------
+  public startFreeThrowShootout() {
+    this.gameMode = 'FREE_THROW_ONLY';
+    this.ftStats = {
+      made: 0,
+      attempts: 0,
+      streak: 0,
+      bestStreak: this.ftStats.bestStreak,
+      greens: 0,
+    };
+    this.onFreeThrowStatsUpdate?.({ ...this.ftStats });
+    this.startFreeThrowRound();
+  }
+
+  public startFreeThrowRound() {
+    this.gameMode = 'FREE_THROW_ONLY';
+    this.ballState = 'FREE_THROW';
+    this.activeShot = null;
+    this.isChargingShot = false;
+    this.ballHolder = null;
+    this.ballVel.set(0, 0, 0);
+
+    this.resetAllPlayerPoses();
+
+    const shooter = this.players.find(p => p.data.team === 'GSW' && p.data.name.includes('CURRY'))
+      || this.players.find(p => p.data.team === 'GSW')
+      || this.controlledPlayer;
+    if (shooter) {
+      this.setControlledPlayer(shooter);
+    }
+
+    const houOpp = this.players.find(p => p.data.team === 'HOU') || this.players[5];
+
+    if (this.nameplateSprite) this.nameplateSprite.visible = false;
+    if (this.playerFloorRing) this.playerFloorRing.visible = false;
+    for (const ft of this.floatingTexts) {
+      this.scene.remove(ft.sprite);
+    }
+    this.floatingTexts = [];
+
+    const isGSW = shooter.data.team === 'GSW';
+    const targetRim = isGSW ? this.gswHoopPos.clone() : this.houHoopPos.clone();
+    const ftZ = isGSW ? -8.8 : 8.8;
+
+    this.activeFoul = {
+      fouledPlayer: shooter,
+      foulerPlayer: houOpp,
+      foulType: 'CHARITY STRIPE SHOOTOUT',
+      attemptsTotal: 2,
+      currentAttempt: 1,
+      stage: 'WHISTLE',
+      timer: 0,
+      shot1Made: false,
+      shot2Made: false,
+      shot3Made: false,
+      hasScoredAttempt1: false,
+      hasScoredAttempt2: false,
+      hasScoredAttempt3: false,
+      isAndOne: false,
+      startPos: new THREE.Vector3(0, 1.35, ftZ + (isGSW ? -0.28 : 0.28)),
+      targetRim,
+    };
+
+    this.setupFreeThrowLineup(shooter);
+    const roundNumber = Math.floor(this.ftStats.attempts / 2) + 1;
+    this.spawnFloatingStatus(`ROUND ${roundNumber} • STREAK: ${this.ftStats.streak} 🔥`, new THREE.Vector3(shooter.position.x, 3.6, shooter.position.z), '#f59e0b');
+    this.emitFoulUI(
+      1,
+      `SHOOTOUT ROUND ${roundNumber} • ATTEMPT 1 OF 2 • STREAK: ${this.ftStats.streak} 🔥`,
+      'PENDING',
+      'PENDING',
+      'PENDING'
+    );
+  }
+
+  public startNormalGame() {
+    this.gameMode = 'NORMAL';
+    this.activeFoul = null;
+    this.activeInjuryState = null;
+    this.pendingShootingFoul = null;
+    this.ballState = 'DRIBBLE';
+    this.resetAllPlayerPoses();
+
+    const curry = this.players.find(p => p.data.team === 'GSW' && p.data.name.includes('CURRY'))
+      || this.players.find(p => p.data.team === 'GSW')
+      || this.players[0];
+    this.setControlledPlayer(curry);
+    this.executeInbound('GSW');
+    this.emitFoulUI(null);
+  }
+
   private setupFreeThrowLineup(shooter: PlayerMesh) {
     const isGSW = shooter.data.team === 'GSW';
     const rimZ = isGSW ? -13.0 : 13.0;
@@ -3384,13 +3526,28 @@ export class BasketballGame {
           this.awardFreeThrowPoint(shooter.data.team);
           this.spawnFloatingStatus('+1 FREE THROW', ft.targetRim, '#10b981');
 
+          if (this.gameMode === 'FREE_THROW_ONLY') {
+            this.ftStats.made++;
+            this.ftStats.attempts++;
+            this.ftStats.streak++;
+            if (this.ftStats.streak > this.ftStats.bestStreak) {
+              this.ftStats.bestStreak = this.ftStats.streak;
+            }
+            if (ft.isGreen) {
+              this.ftStats.greens++;
+            }
+            this.onFreeThrowStatsUpdate?.({ ...this.ftStats });
+          }
+
           const shot1 = attempt === 1 ? 'MADE' : (ft.shot1Made ? 'MADE' : 'MISSED');
           const shot2 = attempt === 2 ? 'MADE' : (attempt > 2 ? (ft.shot2Made ? 'MADE' : 'MISSED') : 'PENDING');
           const shot3 = attempt === 3 ? 'MADE' : 'PENDING';
 
-          const statusMsg = ft.attemptsTotal === 1
-            ? 'AND-ONE FREE THROW: GOOD!'
-            : `FREE THROW ${attempt}: GOOD!`;
+          const statusMsg = this.gameMode === 'FREE_THROW_ONLY'
+            ? `FREE THROW ${attempt}: GOOD! STREAK: ${this.ftStats.streak} 🔥`
+            : (ft.attemptsTotal === 1
+              ? 'AND-ONE FREE THROW: GOOD!'
+              : `FREE THROW ${attempt}: GOOD!`);
           this.emitFoulUI(attempt, statusMsg, shot1, shot2, shot3, { quality: ft.quality, isGreen: ft.isGreen });
         }
       }
@@ -3401,6 +3558,12 @@ export class BasketballGame {
         const shot3 = attempt >= 3 ? (ft.shot3Made ? 'MADE' : 'MISSED') : 'PENDING';
 
         if (isFinalAttempt) {
+          if (this.gameMode === 'FREE_THROW_ONLY') {
+            setTimeout(() => {
+              this.startFreeThrowRound();
+            }, 800);
+            return;
+          }
           const defendingTeam = shooter.data.team === 'GSW' ? 'HOU' : 'GSW';
           this.resetAllPlayerPoses();
           this.emitFoulUI(null);
@@ -3442,17 +3605,31 @@ export class BasketballGame {
           this.triggerNetReaction(isGSW ? 'gsw' : 'hou', 0.35, ftDir);
           this.spawnFloatingStatus('MISSED', impactPos, '#ef4444');
 
+          if (this.gameMode === 'FREE_THROW_ONLY') {
+            this.ftStats.attempts++;
+            this.ftStats.streak = 0;
+            this.onFreeThrowStatsUpdate?.({ ...this.ftStats });
+          }
+
           const shot1 = attempt === 1 ? 'MISSED' : (ft.shot1Made ? 'MADE' : 'MISSED');
           const shot2 = attempt === 2 ? 'MISSED' : (attempt > 2 ? (ft.shot2Made ? 'MADE' : 'MISSED') : 'PENDING');
           const shot3 = attempt === 3 ? 'MISSED' : 'PENDING';
 
-          const statusMsg = isFinalAttempt
-            ? `FREE THROW ${attempt}: MISSED — LIVE BALL!`
-            : `FREE THROW ${attempt}: MISSED`;
+          const statusMsg = this.gameMode === 'FREE_THROW_ONLY'
+            ? `FREE THROW ${attempt}: MISSED! STREAK RESET TO 0`
+            : (isFinalAttempt
+              ? `FREE THROW ${attempt}: MISSED — LIVE BALL!`
+              : `FREE THROW ${attempt}: MISSED`);
           this.emitFoulUI(attempt, statusMsg, shot1, shot2, shot3, { quality: ft.quality, isGreen: false });
         }
 
         if (isFinalAttempt) {
+          if (this.gameMode === 'FREE_THROW_ONLY') {
+            setTimeout(() => {
+              this.startFreeThrowRound();
+            }, 1200);
+            return;
+          }
           // Final attempt miss: Immediately transition to calculated live rebound off the iron!
           this.resetAllPlayerPoses();
           this.emitFoulUI(null);
@@ -3502,7 +3679,13 @@ export class BasketballGame {
   public cycleControlledPlayer() {
     const teammates = this.players.filter(p => p.data.team === 'GSW' && p !== this.controlledPlayer);
     if (teammates.length > 0) {
-      this.setControlledPlayer(teammates[0]);
+      // Sort candidates by proximity to current ball position
+      const ballP = this.ballPos;
+      teammates.sort((a, b) => a.position.distanceTo(ballP) - b.position.distanceTo(ballP));
+      const target = teammates[0];
+      this.setControlledPlayer(target);
+      this.manualSwitchOverrideTimer = 1.4; // Grace period honoring manual user choice
+      this.spawnFloatingStatus(`CONTROL: ${target.data.name}`, target.position, '#38bdf8');
     }
   }
 
@@ -4122,6 +4305,21 @@ export class BasketballGame {
 
     sounds.playSneakerSqueak();
     this.spawnFloatingStatus(`PASS TO ${receiver.data.name}`, receiver.position, '#38bdf8');
+
+    // Automatic Player Switch on Pass (Offense receiver & Defense close-out defender)
+    if (this.autoSwitchEnabled && this.gameMode === 'NORMAL') {
+      if (passer.data.team === 'GSW') {
+        this.setControlledPlayer(receiver);
+        this.autoSwitchCooldownTimer = 0.50;
+      } else {
+        const def = this.getNearestDefender(receiver);
+        if (def && def !== this.controlledPlayer) {
+          this.setControlledPlayer(def);
+          this.autoSwitchCooldownTimer = 0.55;
+          this.spawnFloatingStatus(`CLOSE OUT: ${def.data.name}`, def.position, '#ffd700');
+        }
+      }
+    }
 
     if (!isBouncePass) {
       const targetPos = this.passReceiverPosLead.clone().setY(1.22);
@@ -4842,6 +5040,13 @@ export class BasketballGame {
       offRebounder.isBoxOut = true;
       offRebounder.boxOutTimer = 0.8;
     }
+
+    // Auto-switch: immediately hand control to GSW's best-positioned rebounder
+    if (this.autoSwitchEnabled && this.gameMode === 'NORMAL' && gswRebounder && gswRebounder !== this.controlledPlayer) {
+      this.setControlledPlayer(gswRebounder);
+      this.autoSwitchCooldownTimer = 0.65;
+      this.spawnFloatingStatus(`REBOUND CONTEST: ${gswRebounder.data.name}`, gswRebounder.position, '#38bdf8');
+    }
   }
 
   private updateReboundPursuit(dt: number) {
@@ -4984,6 +5189,15 @@ export class BasketballGame {
       this.onPossessionChange?.(true);
     } else {
       this.onPossessionChange?.(false);
+      // Auto-switch to GSW defender guarding the Houston rebounder/carrier
+      if (this.autoSwitchEnabled && this.gameMode === 'NORMAL') {
+        const def = this.getNearestDefender(p);
+        if (def && def !== this.controlledPlayer) {
+          this.setControlledPlayer(def);
+          this.autoSwitchCooldownTimer = 0.60;
+          this.spawnFloatingStatus(`DEFENSE: ${def.data.name}`, def.position, '#ffd700');
+        }
+      }
     }
   }
 
@@ -5245,6 +5459,85 @@ export class BasketballGame {
       if (this.isInboundPlay && p === this.ballHolder) continue;
       p.position.x = THREE.MathUtils.clamp(p.position.x, -courtLimitX, courtLimitX);
       p.position.z = THREE.MathUtils.clamp(p.position.z, -courtLimitZ, courtLimitZ);
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // AUTOMATIC PLAYER SWITCHING SYSTEM
+  // --------------------------------------------------------------------------
+  private checkAutoPlayerSwitch(dt: number) {
+    if (!this.autoSwitchEnabled || this.gameMode === 'FREE_THROW_ONLY') return;
+    if (this.ballState === 'FREE_THROW' || this.ballState === 'INJURY_SUB' || this.isInboundPlay) return;
+
+    if (this.autoSwitchCooldownTimer > 0) {
+      this.autoSwitchCooldownTimer -= dt;
+    }
+    if (this.manualSwitchOverrideTimer > 0) {
+      this.manualSwitchOverrideTimer -= dt;
+      return;
+    }
+
+    if (this.autoSwitchCooldownTimer > 0) return;
+
+    const gswPlayers = this.players.filter(p => p.data.team === 'GSW');
+    if (gswPlayers.length === 0) return;
+
+    // CASE 1: Golden State has the ball (Offense)
+    if (this.ballHolder && this.ballHolder.data.team === 'GSW') {
+      if (this.controlledPlayer !== this.ballHolder) {
+        this.setControlledPlayer(this.ballHolder);
+        this.autoSwitchCooldownTimer = 0.45;
+      }
+      return;
+    }
+
+    // CASE 2: Live Rebound / Loose Ball in flight (Rebound state)
+    if (this.ballState === 'REBOUND') {
+      const target = this.predictedBouncePoint.lengthSq() > 0 ? this.predictedBouncePoint : this.ballPos;
+      let bestRebounder: PlayerMesh = gswPlayers[0];
+      let minReboundDist = 999;
+      gswPlayers.forEach(p => {
+        const d = p.position.distanceTo(target);
+        if (d < minReboundDist) {
+          minReboundDist = d;
+          bestRebounder = p;
+        }
+      });
+      if (bestRebounder !== this.controlledPlayer && minReboundDist < 5.5) {
+        const curDist = this.controlledPlayer ? this.controlledPlayer.position.distanceTo(target) : 999;
+        if (curDist - minReboundDist > 1.8) {
+          this.setControlledPlayer(bestRebounder);
+          this.autoSwitchCooldownTimer = 0.55;
+          this.spawnFloatingStatus(`REBOUND CONTEST: ${bestRebounder.data.name}`, bestRebounder.position, '#38bdf8');
+        }
+      }
+      return;
+    }
+
+    // CASE 3: Houston has the ball (Defense: on-ball perimeter/paint contest)
+    if (this.ballHolder && this.ballHolder.data.team === 'HOU') {
+      const carrier = this.ballHolder;
+      const curDist = this.controlledPlayer ? this.controlledPlayer.position.distanceTo(carrier.position) : 999;
+
+      let closestDefender: PlayerMesh = gswPlayers[0];
+      let minDefDist = 999;
+      gswPlayers.forEach(p => {
+        const d = p.position.distanceTo(carrier.position);
+        if (d < minDefDist) {
+          minDefDist = d;
+          closestDefender = p;
+        }
+      });
+
+      if (closestDefender && closestDefender !== this.controlledPlayer) {
+        // Switch if user is away from play and teammate is closely engaged with carrier
+        const shouldSwitch = (curDist > 3.4 && minDefDist < 2.2) || (curDist - minDefDist > 2.6);
+        if (shouldSwitch) {
+          this.setControlledPlayer(closestDefender);
+          this.autoSwitchCooldownTimer = 0.60;
+          this.spawnFloatingStatus(`DEFENSE: ${closestDefender.data.name}`, closestDefender.position, '#ffd700');
+        }
+      }
     }
   }
 
@@ -7731,6 +8024,7 @@ export class BasketballGame {
       this.applyPlayerSpacingAndAntiBunching(dt);
       this.updateBallPhysics(dt);
       this.checkOfficialNBARules(dt);
+      this.checkAutoPlayerSwitch(dt);
 
       // Keep 2K Floor Indicator Ring locked to the controlled player's feet
       if (this.controlledPlayer && this.playerFloorRing) {
